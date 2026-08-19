@@ -149,6 +149,22 @@ def cmd_backtest_portfolio(args):
         result = engine.run(nav_data=nav_data, start_date=start_date, variant=variant)
         results.append(result)
 
+    if args.market:
+        from .weekly import load_etf_market_data
+        market_data, _prices, md_warnings = load_etf_market_data()
+        if not market_data:
+            print("\n⚠ --market 市价模式需要 data/cache/{code}_daily.csv（先运行 bootstrap_etf_cache.py），本次跳过。")
+        else:
+            for warning in md_warnings:
+                print(f"  ⚠ {warning}")
+            market_result = engine.run(
+                nav_data=nav_data, start_date=start_date,
+                variant="full", market_data=market_data,
+            )
+            market_result.name = "完整规则(市价撮合)"
+            results.append(market_result)
+            print(f"\n市价模式使用场内价格的标的: {', '.join(sorted(market_data))}")
+
     rows = []
     for result in results:
         m = result.metrics
@@ -193,7 +209,12 @@ def cmd_backtest_portfolio(args):
 
     report_path = generate_portfolio_backtest_report(results)
     print(f"\n组合回测报告: {report_path}")
-    print("\n口径说明: 回测使用天天基金累计净值；日常周度信号使用场内价格，差异主要来自 ETF 折溢价噪声。")
+    if args.market and any(r.name == "完整规则(市价撮合)" for r in results):
+        print("口径说明: 净值组按累计净值成交（溢价闸门不生效，理想上界）；"
+              "市价组按场内价格成交，QDII 溢价闸门生效，与生产周度管线一致。两组差异即溢折价敏感性。")
+    else:
+        print("\n口径说明: 回测按天天基金累计净值成交，QDII 溢价闸门不生效，结果为理想成交假设下的上界；"
+              "加 --market 可输出市价撮合对照。")
 
 
 def _annual_drawdown_pair(result, year):
@@ -262,6 +283,8 @@ def main():
     p_pbt = sub.add_parser("backtest-portfolio", help="ETF 组合级周度配置回测")
     p_pbt.add_argument("--start", default="2016-01-01", help="回测开始日期 YYYY-MM-DD")
     p_pbt.add_argument("--capital", type=float, default=1_000_000, help="初始资金（默认100万）")
+    p_pbt.add_argument("--market", action="store_true",
+                       help="额外用场内价格（含QDII溢价闸门）跑一组市价撮合对照")
     p_pbt.set_defaults(func=cmd_backtest_portfolio)
 
     p_screen = sub.add_parser("screen", help="多因子选股筛选（观察池见 screening/universe.py）")
