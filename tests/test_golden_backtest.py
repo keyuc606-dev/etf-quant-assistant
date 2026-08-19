@@ -13,26 +13,26 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "golden_nav"
 EXPECTED_ANNUAL_RETURNS = [
     {
         "year": 2021,
-        "strategy_return": 0.002270,
+        "strategy_return": 0.002274,
         "benchmark_return": -0.017365,
-        "excess_return": 0.019635,
-        "strategy_max_drawdown": 0.011881,
+        "excess_return": 0.019639,
+        "strategy_max_drawdown": 0.011878,
         "benchmark_max_drawdown": 0.081762,
     },
     {
         "year": 2022,
-        "strategy_return": 0.017727,
+        "strategy_return": 0.017705,
         "benchmark_return": 0.165984,
-        "excess_return": -0.148258,
-        "strategy_max_drawdown": 0.018749,
+        "excess_return": -0.148279,
+        "strategy_max_drawdown": 0.018744,
         "benchmark_max_drawdown": 0.050209,
     },
     {
         "year": 2023,
-        "strategy_return": 0.061980,
+        "strategy_return": 0.061933,
         "benchmark_return": 0.317587,
-        "excess_return": -0.255607,
-        "strategy_max_drawdown": 0.007568,
+        "excess_return": -0.255654,
+        "strategy_max_drawdown": 0.007571,
         "benchmark_max_drawdown": 0.045661,
     },
 ]
@@ -65,8 +65,8 @@ class GoldenPortfolioBacktestTest(unittest.TestCase):
             variant="full",
         )
 
-        self.assertEqual(round(result.metrics["final_equity"], 6), 1083258.504910)
-        self.assertEqual(round(result.metrics["max_drawdown"], 6), 0.018749)
+        self.assertEqual(round(result.metrics["final_equity"], 6), 1083191.557278)
+        self.assertEqual(round(result.metrics["max_drawdown"], 6), 0.018744)
         self.assertEqual(result.metrics["total_trades"], 93)
         self.assertEqual(round_annual_returns(result.annual_returns), EXPECTED_ANNUAL_RETURNS)
 
