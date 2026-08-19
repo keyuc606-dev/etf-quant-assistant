@@ -1,3 +1,4 @@
+import html
 import json
 import shutil
 import datetime
@@ -8,6 +9,15 @@ from ..config import REPORT_DIR
 from .models import BacktestResult
 
 _ECHARTS_ASSET = Path(__file__).resolve().parent / "assets" / "echarts.min.js"
+
+
+def _json_for_script(obj) -> str:
+    """JSON 嵌入 <script> 的安全序列化：转义 < 与行分隔符，防 </script> 闭合注入。"""
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
 
 
 def _ensure_echarts(report_dir: Path):
@@ -85,7 +95,7 @@ def generate_backtest_report(result: BacktestResult,
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>回测报告 - {result.name}({result.code}) - {result.strategy_name}</title>
+<title>回测报告 - {html.escape(str(result.name))}({html.escape(str(result.code))}) - {html.escape(str(result.strategy_name))}</title>
 <script src="echarts.min.js"></script>
 <script>if (typeof echarts === 'undefined') document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"><\\/script>');</script>
 <style>
@@ -119,7 +129,7 @@ tr:hover {{ background: #1c2333; }}
 <div class="header">
     <div>
         <h1>策略回测报告</h1>
-        <div class="sub">{result.name}({result.code}) &mdash; {result.strategy_name}</div>
+        <div class="sub">{html.escape(str(result.name))}({html.escape(str(result.code))}) &mdash; {html.escape(str(result.strategy_name))}</div>
     </div>
     <div class="time">
         <div>{result.start_date} ~ {result.end_date}</div>
@@ -205,7 +215,14 @@ const benchmark = {json.dumps(benchmark_json)};
 const drawdown = {json.dumps(drawdown_json)};
 const buyPoints = {json.dumps(buy_points)};
 const sellPoints = {json.dumps(sell_points)};
-const pairs = {json.dumps(pairs_json, ensure_ascii=False)};
+const pairs = {_json_for_script(pairs_json)};
+
+// innerHTML 模板里的字符串插值经 esc() 转义，防标的名称注入 HTML
+function esc(s) {{
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+}}
 
 const darkTheme = {{
     backgroundColor: '#161b22',
@@ -295,8 +312,8 @@ pairs.forEach(p => {{
     const cls = p.pnl >= 0 ? 'pos' : 'neg';
     const sign = p.pnl >= 0 ? '+' : '';
     tbody.innerHTML += `<tr>
-        <td>${{p.buy_date}}</td><td>${{p.buy_price.toFixed(2)}}</td>
-        <td>${{p.sell_date}}</td><td>${{p.sell_price.toFixed(2)}}</td>
+        <td>${{esc(p.buy_date)}}</td><td>${{p.buy_price.toFixed(2)}}</td>
+        <td>${{esc(p.sell_date)}}</td><td>${{p.sell_price.toFixed(2)}}</td>
         <td>${{p.shares}}</td>
         <td class="${{cls}}">${{sign}}${{p.pnl.toFixed(2)}}</td>
         <td class="${{cls}}">${{sign}}${{p.pnl_pct.toFixed(2)}}%</td>
@@ -345,7 +362,7 @@ def generate_portfolio_backtest_report(results: List[object],
         dd_2018 = _portfolio_annual_drawdown_text(result, 2018)
         dd_2022 = _portfolio_annual_drawdown_text(result, 2022)
         summary_rows += (
-            f"<tr><td>{result.name}</td>"
+            f"<tr><td>{html.escape(str(result.name))}</td>"
             f"<td>{m.get('annual_return', 0):.2%}</td>"
             f"<td>{m.get('max_drawdown', 0):.2%}</td>"
             f"<td>{calmar_text}</td>"
@@ -374,7 +391,7 @@ def generate_portfolio_backtest_report(results: List[object],
             else f"<tr><td>{year}</td><td>{row['strategy_return']:.2%}</td><td>{strategy_dd:.2%}</td><td>N/A</td><td>N/A</td><td>N/A</td></tr>"
         )
 
-    notes = "".join(f"<li>{note}</li>" for note in full.notes)
+    notes = "".join(f"<li>{html.escape(note)}</li>" for note in full.notes)
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -421,7 +438,7 @@ li {{ margin:6px 0; color:#aab4c0; }}
 </div>
 <script>
 const dates = {json.dumps(dates)};
-const variantSeries = {json.dumps(series, ensure_ascii=False)};
+const variantSeries = {_json_for_script(series)};
 const benchmark = {json.dumps(benchmark)};
 const chart = echarts.init(document.getElementById('equity'));
 chart.setOption({{

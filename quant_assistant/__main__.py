@@ -1,10 +1,12 @@
 """
-统一命令行入口。四条固定命令，任何模型/任何人照 CLAUDE.md 执行即可：
+统一命令行入口。七条固定命令，任何模型/任何人照 CLAUDE.md 执行即可：
 
   python -m quant_assistant daily                 # 每日管道：行情→持仓→指标→风控→仪表盘
   python -m quant_assistant backtest 600519       # 回测（--strategy --days 可选）
+  python -m quant_assistant backtest-portfolio    # ETF 组合级回测（--market 市价对照）
   python -m quant_assistant screen                # 多因子选股筛选
   python -m quant_assistant dashboard             # 仅生成仪表盘（离线可用）
+  python -m quant_assistant plan / weekly         # ETF 周报与本周交易清单
 """
 import sys
 import argparse
@@ -307,6 +309,10 @@ def main():
         # 数据文件损坏等已知错误：打印可读信息而非堆栈
         print(f"\n错误: {e}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as e:
+        # 参数格式错误（如 --start 不是 YYYY-MM-DD）：给可读提示而非堆栈
+        print(f"\n参数错误: {e}", file=sys.stderr)
+        sys.exit(2)
     except KeyboardInterrupt:
         print("\n已中断", file=sys.stderr)
         sys.exit(130)
