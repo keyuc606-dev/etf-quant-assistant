@@ -67,6 +67,9 @@ def cmd_daily(args):
         print("\n  !!! 断路器日频监控告警 !!!")
         print(f"  当前回撤 {circuit_warning['drawdown_pct']:.2%}，动作 {circuit_warning['action']}")
         print_emergency_summary(emergency)
+    elif emergency.get("note"):
+        drawdown = emergency["allocation"]["drawdown"]
+        print(f"\n  [提示] {emergency['note']}（当前回撤 {drawdown['drawdown_pct']:.2%}，动作 {drawdown['action']}）")
 
     result["analyzer"].print_dashboard()
 

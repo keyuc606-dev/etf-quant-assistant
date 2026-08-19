@@ -21,8 +21,15 @@ HEARTBEAT_NO_RECORD_NOTICE = "尚无周报运行记录（首次运行或 launchd
 DAILY_CIRCUIT_WARNING = "断路器触发，运行 weekly 获取减仓清单"
 EMERGENCY_REPORT_PREFIX = "emergency"
 EMERGENCY_EXECUTION_NOTE = "应急清单只卖出风险腿，不做买入再平衡；买入归周度清单处理。"
+EMERGENCY_LEVEL_HOLD_NOTE = "断路器已应用同级减仓，维持现有仓位；升级触发或周度清单另行处理"
 BREAKER_UNEXECUTED_WARNING = "上周断路器清单未执行，断路器保持触发状态"
 BREAKER_RESET_APPLIED_MESSAGE = "断路器清零卖出已确认执行，高点已重置"
+AS_OF_BACKFILL_WARNING = "as_of_date 早于今天，数据陈旧门禁按该日期回算，仅供回填核对"
+
+# 断路器级别：仅允许向上跃迁（none→half→zero）。
+# 应急清单对"当前持仓"无状态减半，若同一级别每天重复出单会把风险腿叠乘清零，
+# 因此 weekly/应急共用 state["applied_breaker_level"] 记录已应用到持仓的级别。
+BREAKER_LEVEL_RANK = {"none": 0, "risk_half": 1, "risk_zero": 2}
 
 
 def load_state(path: Path = STATE_PATH) -> Optional[dict]:
@@ -81,6 +88,10 @@ def generate_weekly_report(pm: PortfolioManager,
                            state_path: Path = STATE_PATH,
                            report_dir: Path = REPORT_DIR) -> dict:
     as_of_date = as_of_date or datetime.date.today()
+    if as_of_date < datetime.date.today():
+        backfill_warning = AS_OF_BACKFILL_WARNING
+    else:
+        backfill_warning = None
     market_data, prices, cache_warnings = load_etf_market_data()
     original_state = load_state(state_path)
     heartbeat = weekly_heartbeat_warning(original_state, datetime.datetime.combine(as_of_date, datetime.time(16, 30)))
@@ -89,7 +100,7 @@ def generate_weekly_report(pm: PortfolioManager,
         pm,
     )
     state_for_allocation, pending_warning, pending_events, clear_pending = _resolve_pending_breaker_reset(
-        original_state, execution_check, as_of_date, pm.cumulative_cash_flow
+        original_state, execution_check, as_of_date, pm.cumulative_cash_flow, pm=pm
     )
 
     allocation = compute_allocation(
@@ -101,6 +112,8 @@ def generate_weekly_report(pm: PortfolioManager,
     )
     if pending_warning:
         allocation["warnings"].append(pending_warning)
+    if backfill_warning:
+        allocation["warnings"].append(backfill_warning)
     plan = generate_rebalance_plan(
         target_weights=allocation["target_weights"],
         positions=pm.positions,
@@ -128,6 +141,11 @@ def generate_weekly_report(pm: PortfolioManager,
         f.write(markdown)
 
     state_updates = dict(allocation["state_updates"])
+    # weekly 清单本身已体现当前断路器级别（目标权重 ×factor），是级别的权威来源；
+    # 日频应急据此判断是否需要升级减仓，避免重复出单
+    state_updates["applied_breaker_level"] = (
+        "none" if clear_pending else allocation["drawdown"]["action"]
+    )
     if pending_events:
         state_updates.setdefault("events", []).extend(pending_events)
     if clear_pending and "pending_breaker_reset" not in state_updates:
@@ -245,7 +263,7 @@ def generate_emergency_rebalance(pm: PortfolioManager,
         pm,
     )
     state_for_allocation, pending_warning, pending_events, clear_pending = _resolve_pending_breaker_reset(
-        original_state, execution_check, as_of_date, pm.cumulative_cash_flow
+        original_state, execution_check, as_of_date, pm.cumulative_cash_flow, pm=pm
     )
     allocation = compute_allocation(
         market_data={},
@@ -257,14 +275,19 @@ def generate_emergency_rebalance(pm: PortfolioManager,
     )
     if pending_warning:
         allocation["warnings"].append(pending_warning)
+    if as_of_date < datetime.date.today():
+        allocation["warnings"].append(AS_OF_BACKFILL_WARNING)
     action = allocation["drawdown"]["action"]
-    if action not in ("risk_half", "risk_zero"):
-        if pending_events or clear_pending:
+    applied_level = _applied_breaker_level(original_state)
+    escalated = BREAKER_LEVEL_RANK.get(action, 0) > BREAKER_LEVEL_RANK.get(applied_level, 0)
+    if action not in ("risk_half", "risk_zero") or not escalated:
+        if pending_events or clear_pending or applied_level != "none":
             state_updates = dict(allocation["state_updates"])
             if pending_events:
                 state_updates.setdefault("events", []).extend(pending_events)
             if clear_pending and "pending_breaker_reset" not in state_updates:
                 state_updates["pending_breaker_reset"] = None
+                state_updates["applied_breaker_level"] = "none"
             new_state = save_state(state_path, original_state, state_updates)
         else:
             new_state = original_state
@@ -274,6 +297,9 @@ def generate_emergency_rebalance(pm: PortfolioManager,
             "trades": [],
             "report_path": None,
             "state": new_state,
+            "note": (EMERGENCY_LEVEL_HOLD_NOTE
+                     if action in ("risk_half", "risk_zero") and not escalated
+                     else None),
         }
 
     factor = 0.5 if action == "risk_half" else 0.0
@@ -284,6 +310,8 @@ def generate_emergency_rebalance(pm: PortfolioManager,
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(markdown)
     state_updates = dict(allocation["state_updates"])
+    # 跃迁出单后才更新已应用级别；同级重跑不出单（见 BREAKER_LEVEL_RANK 注释）
+    state_updates["applied_breaker_level"] = action
     if pending_events:
         state_updates.setdefault("events", []).extend(pending_events)
     if clear_pending and "pending_breaker_reset" not in state_updates:
@@ -444,18 +472,55 @@ def check_previous_plan_execution(previous_plan: Optional[dict],
     }
 
 
+def _applied_breaker_level(state: Optional[dict]) -> str:
+    if isinstance(state, dict):
+        level = state.get("applied_breaker_level")
+        if level in BREAKER_LEVEL_RANK:
+            return level
+    return "none"
+
+
+def _risk_leg_stop_sells_executed(previous_plan: Optional[dict],
+                                  pm: PortfolioManager,
+                                  lot_tolerance: int = 100) -> bool:
+    """断路器高水位重置的确认条件：只核对风险腿清零 SELL 是否足额执行。
+
+    同清单中 BUY 因现金不足被 planner 缩量/跳过属正常路径，不应卡死重置；
+    SELL 侧允许 ±1 手取整容差。
+    """
+    if not isinstance(previous_plan, dict) or pm is None:
+        return False
+    trades = previous_plan.get("trades")
+    snapshot = previous_plan.get("position_shares")
+    if not isinstance(trades, list) or not isinstance(snapshot, dict):
+        return False
+    current = {pos.code: int(pos.shares) for pos in pm.positions}
+    for trade in trades:
+        code = trade.get("code")
+        if code not in RISK_LEGS or trade.get("action") != "SELL":
+            continue
+        shares = int(trade.get("shares", 0) or 0)
+        before = int(snapshot.get(code, 0) or 0)
+        now = int(current.get(code, 0) or 0)
+        expected_max = max(0, before - shares) + lot_tolerance
+        if now > expected_max:
+            return False
+    return True
+
+
 def _resolve_pending_breaker_reset(original_state: Optional[dict],
                                    execution_check: dict,
                                    as_of_date: datetime.date,
-                                   cumulative_cash_flow: float) -> Tuple[Optional[dict], Optional[str], List[dict], bool]:
+                                   cumulative_cash_flow: float,
+                                   pm: Optional[PortfolioManager] = None) -> Tuple[Optional[dict], Optional[str], List[dict], bool]:
     if not isinstance(original_state, dict):
         return original_state, None, [], False
     pending = original_state.get("pending_breaker_reset")
     if not isinstance(pending, dict):
         return original_state, None, [], False
     checked = bool(execution_check.get("checked"))
-    unexecuted = execution_check.get("unexecuted") or []
-    if not checked or unexecuted:
+    if not checked or not _risk_leg_stop_sells_executed(
+            original_state.get("last_weekly_plan"), pm):
         return original_state, BREAKER_UNEXECUTED_WARNING, [], False
 
     reset_to = float(pending.get("reset_to", 0.0) or 0.0)
