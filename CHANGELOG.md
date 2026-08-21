@@ -15,6 +15,7 @@
 - **P1 潜伏 XSS 加固**：HTML 报告/仪表盘 JSON 嵌入统一转义 `<`/U+2028/9，渲染端 innerHTML 插值经 `esc()`；新增回归测试。
 - **工程**：补 LICENSE（MIT）；`.gitignore` 覆盖 `*.json.tmp` 崩溃残留；CLI 对 ValueError 给可读错误；观察池默认字典防污染；禁买池 CRITICAL 告警补操作建议；README/CLAUDE.md 口径同步。
 - 测试 52 → 67 项；黄金样本随买入计费行为更新（final_equity 1083258.50 → 1083191.56，-0.006%，交易笔数不变）。
+- **依赖**：akshare 1.18.64 → 1.18.94。锁定版对东财当前接口解析必挂（`fund_etf_fund_info_em` 报 "Length mismatch: Expected axis has 14 elements, new values have 13"），累计净值数据断供；升级后 8 只净值+日线缓存全量拉取验证通过，67 项测试不变绿→绿。（东财全量拉取对 IP 限流敏感，失败等 3-5 分钟重试即可。）
 
 ## v1.2.0（2026-07-08）— 对抗性审计整改
 
