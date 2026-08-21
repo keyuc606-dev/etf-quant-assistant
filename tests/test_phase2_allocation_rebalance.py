@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from quant_assistant.allocation.engine import compute_allocation, STATE_RESET_WARNING, STOP_PENDING_MESSAGE
-from quant_assistant.config import ETF_POOL, FX_RATES, STRATEGY_PARAMS
+from quant_assistant.config import ETF_POOL, FX_RATES, STRATEGY_PARAMS, TARGET_WEIGHTS
 from quant_assistant.models import Market
 from quant_assistant.rebalance.planner import (MISSING_DATA_BLOCK_MESSAGE, QDII_UNKNOWN_PREMIUM_NOTE,
                                                STALE_BLOCK_MESSAGE,
@@ -295,6 +295,75 @@ class Phase2AllocationRebalanceTest(unittest.TestCase):
         self.assertEqual(allocation["trend_status"]["510300"]["status"], "跌破200日线")
         self.assertEqual(allocation["target_weights"]["510300"], 0.0)
         self.assertGreaterEqual(allocation["target_weights"]["511360"], 0.325)
+
+    def test_constrain_buys_reserves_fee_and_price_buffer(self):
+        from quant_assistant.rebalance.planner import _constrain_buys
+        trades = [{
+            "code": "510300", "name": "沪深300ETF", "action": "BUY",
+            "shares": 900, "price": 10.0, "amount": 9000.0,
+            "estimated_fee": 5.0, "category": "再平衡", "reason": "测试",
+        }]
+        # 900股金额9000 ≤ 现金9002，旧算法照单接受（忽略费用）；实际 9000+5元
+        # 费用已超现金 → 应回落到800股（含0.2%价格缓冲）
+        accepted, skipped = _constrain_buys(trades, 9002.0, dict(STRATEGY_PARAMS))
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["shares"], 800)
+        self.assertLessEqual(accepted[0]["amount"] + accepted[0]["estimated_fee"], 9002.0)
+
+    def test_zero_total_assets_does_not_trigger_breaker(self):
+        data = make_market_data(self.as_of)
+        allocation = compute_allocation(
+            data,
+            total_assets=0.0,
+            state={"circuit_breaker_high_water": 100000.0},
+            as_of_date=self.as_of,
+        )
+        self.assertEqual(allocation["drawdown"]["action"], "none")
+        self.assertNotIn("pending_breaker_reset", allocation["state_updates"])
+        self.assertTrue(any("总资产" in w for w in allocation["warnings"]))
+
+    def test_disable_switches_surface_in_warnings(self):
+        data = make_market_data(self.as_of)
+        params = dict(STRATEGY_PARAMS)
+        params["disable_trend_filter"] = True
+        params["disable_circuit_breaker"] = True
+        allocation = compute_allocation(
+            data, total_assets=100000.0,
+            state={"circuit_breaker_high_water": 100000.0},
+            as_of_date=self.as_of, params=params,
+        )
+        self.assertTrue(any("disable_trend_filter" in w for w in allocation["warnings"]))
+        self.assertTrue(any("disable_circuit_breaker" in w for w in allocation["warnings"]))
+
+    def test_nonuniform_leg_weights_are_warned(self):
+        data = make_market_data(self.as_of)
+        target = dict(TARGET_WEIGHTS)
+        target["510300"] = 0.15
+        target["512890"] = 0.10
+        allocation = compute_allocation(
+            data, total_assets=100000.0,
+            state={"circuit_breaker_high_water": 100000.0},
+            as_of_date=self.as_of, target_weights=target,
+        )
+        self.assertTrue(any("候选权重不相等" in w for w in allocation["warnings"]))
+
+    def test_slot_release_counts_blocked_candidates_not_budget_ratio(self):
+        data = make_market_data(self.as_of)
+        data["510300"] = make_daily(self.as_of, start_price=100.0, step=0.0, final_price=80.0)
+        target = dict(TARGET_WEIGHTS)
+        # 非均匀：被过滤的 510300 权重 0.29，旧算法 round(0.29/0.15)=2 会错放0槽
+        target["510300"] = 0.29
+        target["512890"] = 0.005
+        target["510500"] = 0.005
+        allocation = compute_allocation(
+            data, total_assets=100000.0,
+            state={"circuit_breaker_high_water": 100000.0},
+            as_of_date=self.as_of, target_weights=target,
+        )
+        # 槽位按被过滤候选个数释放：2-1=1，512890/510500 中动量最优者入选
+        self.assertEqual(len(allocation["signals"]["a_share_selected"]), 1)
+        self.assertAlmostEqual(sum(allocation["target_weights"].values()), 1.0)
 
     def test_risk_zero_writes_pending_reset_without_resetting_high_water(self):
         data = make_market_data(self.as_of)

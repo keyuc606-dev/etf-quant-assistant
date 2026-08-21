@@ -11,8 +11,13 @@ from ..rebalance import generate_rebalance_plan
 
 
 BACKTEST_NAV_NOTE = (
-    "回测使用天天基金累计净值，含分红、历史不随除权漂移；"
-    "日常周度信号使用场内价格，两者差异主要来自 ETF 折溢价噪声。"
+    "回测使用天天基金累计净值成交（分红按净值再投资、不含场内溢折价与买卖价差），"
+    "该模式下 QDII 溢价闸门无市价可比、不生效；结果应视为理想成交假设下的上界。"
+    "日常周度信号使用场内价格，敏感性对比请运行 --market 市价模式。"
+)
+BACKTEST_MARKET_NOTE = (
+    "回测信号与成交均使用场内前复权价格（data/cache/{code}_daily.csv），"
+    "QDII 溢价闸门按 市价/单位净值 计算并生效，与生产周度管线口径一致。"
 )
 
 
@@ -72,15 +77,30 @@ class PortfolioBacktestEngine:
         self.config = config or PortfolioBacktestConfig()
 
     def run(self, nav_data: Dict[str, pd.DataFrame], start_date: datetime.date,
-            variant: str = "full") -> PortfolioBacktestResult:
-        price_table = self._price_table(nav_data)
+            variant: str = "full",
+            market_data: Optional[Dict[str, pd.DataFrame]] = None) -> PortfolioBacktestResult:
+        """跑组合级回测。
+
+        默认（净值模式）：信号与成交都用累计净值，历史长、含分红，但无溢折价，
+        QDII 溢价闸门不生效。传入 ``market_data``（场内日线，含可选"单位净值"列）
+        则切换为市价模式：信号与成交均按场内价格，溢价闸门生效，与生产口径一致。
+        """
+        market_mode = market_data is not None and any(
+            df is not None and not df.empty for df in market_data.values()
+        )
+        if market_mode:
+            price_table = self._market_price_table(market_data)
+            all_history = self._market_allocation_frames(market_data)
+        else:
+            price_table = self._price_table(nav_data)
+            all_history = self._allocation_frames(nav_data)
         price_table = price_table[price_table.index >= pd.Timestamp(start_date)]
         if price_table.empty:
-            raise ValueError("累计净值数据为空，无法回测")
+            raise ValueError("回测价格数据为空，无法回测")
 
         benchmark = self._benchmark_series(price_table)
         signal_dates = set(self._weekly_signal_dates(price_table.index))
-        first_dates = self._first_dates(nav_data)
+        first_dates = self._first_dates(market_data if market_mode else nav_data)
         params = dict(STRATEGY_PARAMS)
         if variant == "no_circuit":
             params["disable_circuit_breaker"] = True
@@ -103,7 +123,6 @@ class PortfolioBacktestEngine:
         trades = []
         signals_log = []
 
-        all_history = self._allocation_frames(nav_data)
         previous_date = None
 
         for idx, ts in enumerate(price_table.index):
@@ -129,9 +148,9 @@ class PortfolioBacktestEngine:
             })
 
             if ts in signal_dates and idx < len(price_table.index) - 1:
-                market_data = self._market_data_until(all_history, ts, first_dates)
+                signal_data = self._market_data_until(all_history, ts, first_dates)
                 allocation = compute_allocation(
-                    market_data=market_data,
+                    market_data=signal_data,
                     total_assets=total_assets,
                     state=state,
                     as_of_date=date,
@@ -159,18 +178,28 @@ class PortfolioBacktestEngine:
                     "drawdown_pct": allocation["drawdown"]["drawdown_pct"],
                     "target_weights": adjusted_target_weights,
                     "trade_count": len(plan["trades"]),
+                    "blocked": bool(plan.get("blocked")),
+                    "blocked_reason": plan.get("message", ""),
                     "warnings": allocation["warnings"],
                 })
 
         metrics = self._metrics(equity_curve)
         metrics["total_trades"] = len(trades)
         annual_returns = self._annual_returns(equity_curve)
+        price_label = "场内价格" if market_mode else "累计净值"
         notes = [
-            BACKTEST_NAV_NOTE,
-            "成交假设：周五收盘出信号，下一交易日按累计净值成交；买入加 0.1% 滑点，卖出扣 0.1% 滑点。",
+            BACKTEST_MARKET_NOTE if market_mode else BACKTEST_NAV_NOTE,
+            f"成交假设：周五收盘出信号，下一交易日按{price_label}成交；"
+            "买入加 0.1% 滑点，卖出扣 0.1% 滑点。",
             "闲置现金按年化2%计息（货币基金保守近似），主要影响 2020-08 前短融无数据区间。",
-            "512890 上市前使用 510300 替代该腿；其余标的上市前预算回落短融ETF。",
         ]
+        notes.extend(self._data_substitution_notes(start_date, first_dates))
+        blocked_weeks = sum(1 for row in signals_log if row.get("blocked"))
+        if blocked_weeks:
+            notes.append(
+                f"警告：{blocked_weeks} 个信号周因数据门禁（陈旧/缺失）未生成再平衡清单，"
+                "回测可能低估规则效果，请核对数据完整性。"
+            )
         return PortfolioBacktestResult(
             name=name,
             start_date=equity_curve[0]["date"] if equity_curve else None,
@@ -220,6 +249,22 @@ class PortfolioBacktestEngine:
         return table.ffill()
 
     @staticmethod
+    def _market_price_table(market_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        frames = []
+        for code, df in market_data.items():
+            if df is None or df.empty or "收盘" not in df.columns:
+                continue
+            clean = df.copy()
+            clean["日期"] = pd.to_datetime(clean["日期"])
+            clean["收盘"] = pd.to_numeric(clean["收盘"], errors="coerce")
+            clean = clean.dropna(subset=["日期", "收盘"]).sort_values("日期")
+            frames.append(clean.set_index("日期")["收盘"].rename(code))
+        if not frames:
+            return pd.DataFrame()
+        table = pd.concat(frames, axis=1).sort_index()
+        return table.ffill()
+
+    @staticmethod
     def _benchmark_series(price_table: pd.DataFrame) -> dict:
         if "510300" not in price_table:
             return {}
@@ -261,6 +306,59 @@ class PortfolioBacktestEngine:
                             .sort_values("日期")
                             .reset_index(drop=True))
         return frames
+
+    @staticmethod
+    def _market_allocation_frames(market_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        """市价模式的信号帧：收盘=场内价，保留"单位净值"列供 QDII 溢价闸门使用。
+
+        注意不能在净值帧里附单位净值——累计净值/单位净值之差是累计分红而非溢价，
+        会造成溢价闸门误判。
+        """
+        frames = {}
+        for code, df in market_data.items():
+            if df is None or df.empty or "收盘" not in df.columns:
+                continue
+            clean = df.copy()
+            clean["日期"] = pd.to_datetime(clean["日期"])
+            clean["收盘"] = pd.to_numeric(clean["收盘"], errors="coerce")
+            clean["开盘"] = clean["收盘"]
+            clean["最高"] = clean["收盘"]
+            clean["最低"] = clean["收盘"]
+            cols = ["日期", "开盘", "收盘", "最高", "最低"]
+            if "单位净值" in clean.columns:
+                clean["单位净值"] = pd.to_numeric(clean["单位净值"], errors="coerce")
+                cols.append("单位净值")
+            frames[code] = (clean[cols]
+                            .dropna(subset=["日期", "收盘"])
+                            .sort_values("日期")
+                            .reset_index(drop=True))
+        return frames
+
+    @staticmethod
+    def _data_substitution_notes(start_date: datetime.date,
+                                 first_dates: Dict[str, datetime.date]) -> List[str]:
+        notes = []
+        first_512890 = first_dates.get("512890")
+        if first_512890 is not None and start_date < first_512890:
+            sub_end = first_512890 - datetime.timedelta(days=1)
+            notes.append(
+                f"数据替代：512890 上市前（{start_date} ~ {sub_end}）以 510300 数据替代该腿，"
+                "该区间收益/回撤反映的是替代标的特性，非红利低波本身。"
+            )
+        late_codes = sorted(
+            (code for code, first in first_dates.items()
+             if first is not None and first > start_date),
+            key=lambda c: first_dates[c],
+        )
+        if late_codes:
+            spans = "、".join(
+                f"{code} 自 {first_dates[code].isoformat()} 起有数据" for code in late_codes
+            )
+            notes.append(
+                f"数据起点晚于回测起点：{spans}；此前该腿预算回落短融ETF/现金，"
+                "早期年份结果含构造成分，且标的池为事后选定（生存者偏差），解读时请注意。"
+            )
+        return notes
 
     def _market_data_until(self, all_history: Dict[str, pd.DataFrame], ts: pd.Timestamp,
                            first_dates: Dict[str, datetime.date]) -> Dict[str, pd.DataFrame]:

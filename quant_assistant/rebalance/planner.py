@@ -232,15 +232,28 @@ def _constrain_buys(buy_trades: List[dict], available_cash: float,
     remaining = available_cash
     lot_size = params["lot_size"]
     min_trade_amount = params["min_trade_amount"]
+    # 参考价是缓存收盘价，次日实际成交价可能更高；预留价格缓冲并逐笔扣除
+    # 买入费用（每笔最低佣金），否则多笔叠加后尾部清单可能超出可用资金被券商废单
+    price_buffer = max(0.0, float(params.get("buy_price_buffer", 0.0) or 0.0))
 
     for trade in ordered:
         if remaining <= 0:
             skipped.append(_cash_skip_record(trade))
             continue
-        affordable_shares = _round_lot(remaining / trade["price"], lot_size)
+        effective_price = trade["price"] * (1.0 + price_buffer)
+        affordable_shares = _round_lot(remaining / effective_price, lot_size)
         shares = min(trade["shares"], affordable_shares)
         shares = _round_lot(shares, lot_size)
+        if shares <= 0 or shares * trade["price"] < min_trade_amount:
+            skipped.append(_cash_skip_record(trade))
+            continue
+
         amount = shares * trade["price"]
+        fee = _estimate_fee(amount, params)
+        while shares > 0 and amount + fee > remaining:
+            shares -= lot_size
+            amount = shares * trade["price"]
+            fee = _estimate_fee(amount, params)
         if shares <= 0 or amount < min_trade_amount:
             skipped.append(_cash_skip_record(trade))
             continue
@@ -248,11 +261,11 @@ def _constrain_buys(buy_trades: List[dict], available_cash: float,
         adjusted = dict(trade)
         adjusted["shares"] = int(shares)
         adjusted["amount"] = float(amount)
-        adjusted["estimated_fee"] = _estimate_fee(amount, params)
+        adjusted["estimated_fee"] = fee
         if shares < trade["shares"]:
             adjusted["reason"] = trade["reason"] + "；受本周可用资金约束缩量"
         accepted.append(adjusted)
-        remaining -= amount
+        remaining -= amount + fee
 
     return accepted, skipped
 

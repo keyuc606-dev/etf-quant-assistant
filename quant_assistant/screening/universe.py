@@ -35,7 +35,8 @@ class StockUniverse:
     """股票池：管理候选标的列表及基本信息"""
 
     def __init__(self, watchlist: Optional[dict] = None):
-        self.stocks = watchlist or A_SHARE_WATCHLIST
+        # 拷贝一份，避免 add/remove 意外污染模块级默认观察池
+        self.stocks = dict(watchlist) if watchlist is not None else dict(A_SHARE_WATCHLIST)
 
     def add(self, code: str, name: str, sector: str):
         self.stocks[code] = {"name": name, "sector": sector}

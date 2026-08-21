@@ -61,6 +61,12 @@ def generate_suggestions(pm: PortfolioManager, alerts: List[RiskAlert]) -> List[
                     f"暂不操作但需密切关注"
                 )
 
+        elif alert.rule_name == "禁买池":
+            suggestions.append(
+                f"{alert.stock_code} 已列入禁买池（CRITICAL）。"
+                f"立即停止买入并复核持仓，按迁移规则逐步清出"
+            )
+
     # 去重
     seen = set()
     unique = []

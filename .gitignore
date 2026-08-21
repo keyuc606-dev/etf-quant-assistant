@@ -16,6 +16,7 @@ Thumbs.db
 # 运行态与个人数据（公开仓库永不提交）
 data/portfolio.json
 data/portfolio.json.bak
+data/*.json.tmp
 data/*.corrupt-*
 data/state.json
 data/cache/*

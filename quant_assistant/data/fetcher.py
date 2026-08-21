@@ -1,3 +1,4 @@
+import os
 import time
 import datetime
 from pathlib import Path
@@ -9,6 +10,46 @@ import akshare as ak
 
 from ..config import CACHE_DIR
 from ..models import Market
+
+
+# A股收盘以北京时间为准；部署在 UTC 容器/CI 上时本地时区会错位 8 小时
+CN_TZ = datetime.timezone(datetime.timedelta(hours=8), "Asia/Shanghai")
+CALENDAR_PATH = CACHE_DIR / "trade_calendar.csv"
+
+_CALENDAR_CACHE = None        # set[str "YYYY-MM-DD"]，模块级只读一次
+_CALENDAR_LOADED = False
+
+
+def cached_trade_dates() -> Optional[set]:
+    """读取本地交易日历缓存（只读文件，不联网）。无缓存/损坏返回 None。"""
+    global _CALENDAR_CACHE, _CALENDAR_LOADED
+    if not _CALENDAR_LOADED:
+        _CALENDAR_LOADED = True
+        try:
+            df = pd.read_csv(CALENDAR_PATH)
+            col = "trade_date" if "trade_date" in df.columns else df.columns[0]
+            _CALENDAR_CACHE = set(pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d"))
+        except Exception:
+            _CALENDAR_CACHE = None
+    return _CALENDAR_CACHE
+
+
+def _atomic_write_csv(path: Path, df: pd.DataFrame) -> None:
+    """先写临时文件再原子替换，避免写一半被 kill 留下截断的 CSV。"""
+    tmp = path.with_suffix(".csv.tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """东财快照表对停牌/无行情标的常填 '-'，直接 float() 会抛 ValueError。"""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if result != result:  # NaN
+        return default
+    return result
 
 
 def resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
@@ -121,7 +162,7 @@ class DataFetcher:
             merged = (pd.concat(frames)
                       .drop_duplicates(subset="日期", keep="last")
                       .sort_values("日期"))
-            merged.to_csv(new_path, index=False)
+            _atomic_write_csv(new_path, merged)
         for p in legacy:
             p.unlink()
 
@@ -139,17 +180,51 @@ class DataFetcher:
 
     @staticmethod
     def _last_completed_trading_day() -> datetime.date:
-        """最近一个已收盘的交易日（工作日近似，不含节假日日历）"""
-        now = datetime.datetime.now()
+        """最近一个已收盘的交易日：北京时间 16:00 为界，优先用交易日历识别节假日。"""
+        now = datetime.datetime.now(CN_TZ)
         d = now.date()
         if now.hour < 16:
             d -= datetime.timedelta(days=1)
+        trade_dates = cached_trade_dates()
+        if trade_dates is not None:
+            floor = d - datetime.timedelta(days=40)
+            while d.isoformat() not in trade_dates and d > floor:
+                d -= datetime.timedelta(days=1)
+            return d
         while d.weekday() >= 5:
             d -= datetime.timedelta(days=1)
         return d
 
+    def _maybe_refresh_trade_calendar(self) -> None:
+        """交易日历缺失或覆盖不足半年时联网刷新（只在本方法内发生）。"""
+        global _CALENDAR_CACHE, _CALENDAR_LOADED
+        trade_dates = cached_trade_dates()
+        if trade_dates:
+            try:
+                latest = datetime.datetime.strptime(max(trade_dates), "%Y-%m-%d").date()
+            except ValueError:
+                latest = None
+            if latest is not None and latest >= datetime.date.today() + datetime.timedelta(days=90):
+                return
+
+        def _do_fetch():
+            return ak.tool_trade_date_hist_sina()
+
+        df = self._fetch_with_retry(_do_fetch, "交易日历")
+        if df is None or df.empty or "trade_date" not in df.columns:
+            return
+        try:
+            dates = pd.to_datetime(df["trade_date"])
+            frame = pd.DataFrame({"trade_date": dates.dt.strftime("%Y-%m-%d")})
+            _atomic_write_csv(CALENDAR_PATH, frame)
+            _CALENDAR_CACHE = set(frame["trade_date"])
+            _CALENDAR_LOADED = True
+        except Exception as e:
+            print(f"  交易日历缓存写入失败({e})，继续用工作日近似")
+
     def fetch_hist(self, code: str, market: Market, period: str = "daily",
                    days: int = 120) -> Optional[pd.DataFrame]:
+        self._maybe_refresh_trade_calendar()
         today = datetime.date.today()
         want_start = today - datetime.timedelta(days=days)
         cached = self._load_cache(code, period)
@@ -198,10 +273,22 @@ class DataFetcher:
                 return self._slice(cached, want_start)
             return None
 
-        if "日期" in df.columns:
+        # 接口改版/返回异常列时解析会抛错，此时与联网失败同等降级到缓存，
+        # 而不是把异常抛给上层导致整条管道中断
+        try:
+            if "日期" not in df.columns:
+                raise ValueError("接口返回缺少 日期 列")
             df["日期"] = pd.to_datetime(df["日期"])
-        df = df.sort_values("日期").reset_index(drop=True)
-        df.to_csv(self._cache_path(code, period), index=False)
+            df = df.sort_values("日期").reset_index(drop=True)
+        except Exception as e:
+            if cached is not None:
+                print(f"  {code}: 行情解析失败({e})，使用本地缓存，数据截止 "
+                      f"{cached['日期'].max().date()}（离线模式）")
+                return self._slice(cached, want_start)
+            print(f"  {code}: 行情解析失败({e})，且无本地缓存可用")
+            return None
+
+        _atomic_write_csv(self._cache_path(code, period), df)
         time.sleep(1)
         return self._slice(df, want_start)
 
@@ -260,6 +347,7 @@ class DataFetcher:
             return None
 
         df.to_csv(self._cache_path(code, "nav"), index=False)
+        time.sleep(1)
         return self._slice(df, want_start)
 
     @staticmethod
@@ -316,11 +404,11 @@ class DataFetcher:
         row = row.iloc[0]
         return {
             "code": code,
-            "name": row.get("名称", ""),
-            "price": float(row.get("最新价", 0)),
-            "change_pct": float(row.get("涨跌幅", 0)),
-            "volume": float(row.get("成交量", 0)),
-            "amount": float(row.get("成交额", 0)),
+            "name": str(row.get("名称", "")),
+            "price": _safe_float(row.get("最新价")),
+            "change_pct": _safe_float(row.get("涨跌幅")),
+            "volume": _safe_float(row.get("成交量")),
+            "amount": _safe_float(row.get("成交额")),
         }
 
     def fetch_realtime_a(self, code: str) -> Optional[dict]:

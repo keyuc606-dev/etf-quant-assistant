@@ -23,6 +23,18 @@ def make_nav_data(start="2019-01-01", end="2020-04-30", shock=False):
     return data
 
 
+def make_market_data(nav_data, qdii_premium=None):
+    """由净值数据派生场内价格帧；qdii_premium 对两只 QDII 统一设置溢价。"""
+    market = {}
+    for code, df in nav_data.items():
+        clean = df.copy()
+        clean["收盘"] = clean["累计净值"]
+        if qdii_premium is not None and code in ("513100", "513500"):
+            clean["单位净值"] = clean["收盘"] / (1.0 + qdii_premium)
+        market[code] = clean
+    return market
+
+
 class PortfolioBacktestEngineTest(unittest.TestCase):
 
     def test_weekly_signal_trades_on_next_trading_day(self):
@@ -72,6 +84,63 @@ class PortfolioBacktestEngineTest(unittest.TestCase):
         )
         self.assertFalse(result.trades)
         self.assertAlmostEqual(result.metrics["annual_return"], 0.05, places=4)
+
+    def test_market_mode_runs_and_uses_market_note(self):
+        nav_data = make_nav_data()
+        engine = PortfolioBacktestEngine(PortfolioBacktestConfig(initial_capital=1_000_000.0))
+        result = engine.run(
+            nav_data=nav_data,
+            start_date=datetime.date(2020, 1, 6),
+            variant="full",
+            market_data=make_market_data(nav_data),
+        )
+        self.assertTrue(any("场内前复权价格" in note for note in result.notes))
+        self.assertTrue(any("溢价闸门" in note and "生效" in note for note in result.notes))
+
+    def test_market_mode_premium_gate_blocks_qdii_buy(self):
+        nav_data = make_nav_data()
+        market_data = make_market_data(nav_data, qdii_premium=0.05)
+        engine = PortfolioBacktestEngine(PortfolioBacktestConfig(initial_capital=1_000_000.0))
+        result = engine.run(
+            nav_data=nav_data,
+            start_date=datetime.date(2020, 1, 6),
+            variant="full",
+            market_data=market_data,
+        )
+        qdii_buys = [t for t in result.trades
+                     if t["action"] == "BUY" and t["code"] in ("513100", "513500")]
+        self.assertEqual(qdii_buys, [])
+        # 溢价超限的 QDII 权重应归零，预算回短融
+        overweight = [row for row in result.signals_log
+                      if row["target_weights"].get("513100", 0) > 0
+                      or row["target_weights"].get("513500", 0) > 0]
+        self.assertEqual(overweight, [])
+
+    def test_market_mode_premium_gate_not_falsely_triggered_without_unit_nav(self):
+        """净值模式（无单位净值列）不得把累计净值/单位净值误当溢价。"""
+        nav_data = make_nav_data()
+        engine = PortfolioBacktestEngine(PortfolioBacktestConfig(initial_capital=1_000_000.0))
+        result = engine.run(
+            nav_data=nav_data,
+            start_date=datetime.date(2020, 1, 6),
+            variant="full",
+        )
+        qdii_buys = [t for t in result.trades
+                     if t["action"] == "BUY" and t["code"] in ("513100", "513500")]
+        self.assertTrue(qdii_buys)
+
+    def test_substitution_window_is_annotated_in_notes(self):
+        nav_data = make_nav_data()
+        # 512890 数据起点显著晚于回测起点
+        late = nav_data["512890"]
+        nav_data["512890"] = late[late["日期"] >= pd.Timestamp("2020-02-03")]
+        engine = PortfolioBacktestEngine(PortfolioBacktestConfig(initial_capital=1_000_000.0))
+        result = engine.run(
+            nav_data=nav_data,
+            start_date=datetime.date(2020, 1, 6),
+            variant="full",
+        )
+        self.assertTrue(any("数据替代" in note and "510300" in note for note in result.notes))
 
 
 if __name__ == "__main__":

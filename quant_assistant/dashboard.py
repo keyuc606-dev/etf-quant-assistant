@@ -10,6 +10,15 @@ from .portfolio.risk_engine import RiskEngine
 from .config import REPORT_DIR
 
 
+def _json_for_script(obj) -> str:
+    """JSON 嵌入 <script> 的安全序列化：转义 < 与行分隔符，防 </script> 闭合注入。"""
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
 def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
                        output_path: Optional[Path] = None,
                        top_alerts: Optional[List[str]] = None) -> Path:
@@ -111,16 +120,16 @@ def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
         total_pnl=total_pnl,
         total_pnl_pct=total_pnl_pct,
         hhi=conc["hhi_index"],
-        positions=json.dumps(positions_json, ensure_ascii=False),
-        market_dist=json.dumps(market_dist_json, ensure_ascii=False),
-        sector_dist=json.dumps(sector_dist_json, ensure_ascii=False),
-        alerts=json.dumps(alerts_json, ensure_ascii=False),
-        kline_data=json.dumps(kline_data_json, ensure_ascii=False),
-        signals=json.dumps(signals_json, ensure_ascii=False),
+        positions=_json_for_script(positions_json),
+        market_dist=_json_for_script(market_dist_json),
+        sector_dist=_json_for_script(sector_dist_json),
+        alerts=_json_for_script(alerts_json),
+        kline_data=_json_for_script(kline_data_json),
+        signals=_json_for_script(signals_json),
         num_danger=sum(1 for a in alerts if a.level == "DANGER"),
         num_warning=sum(1 for a in alerts if a.level == "WARNING"),
         num_critical=sum(1 for a in alerts if a.level == "CRITICAL"),
-        top_alerts=json.dumps(top_alerts or [], ensure_ascii=False),
+        top_alerts=_json_for_script(top_alerts or []),
     )
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -305,13 +314,20 @@ const topAlerts = {ctx["top_alerts"]};
 
 const COLORS = ["#3498db","#2ecc71","#e74c3c","#f39c12","#9b59b6","#1abc9c","#e67e22","#34495e"];
 
+// 所有 innerHTML 模板里的字符串插值必须经 esc()，防持仓名/告警文本注入 HTML
+function esc(s) {{
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+}}
+
 if (topAlerts.length > 0) {{
     const container = document.querySelector(".container");
     const alertBox = document.createElement("div");
     alertBox.className = "section";
     alertBox.style.borderColor = "#e74c3c";
     alertBox.style.background = "rgba(231,76,60,0.12)";
-    alertBox.innerHTML = "<h2>断路器告警</h2>" + topAlerts.map(a => `<div class="alert-item alert-CRITICAL">${{a}}</div>`).join("");
+    alertBox.innerHTML = "<h2>断路器告警</h2>" + topAlerts.map(a => `<div class="alert-item alert-CRITICAL">${{esc(a)}}</div>`).join("");
     container.prepend(alertBox);
 }}
 
@@ -321,7 +337,7 @@ positions.forEach(p => {{
     const pnlClass = p.pnl_pct >= 0 ? "pos" : "neg";
     const sign = p.pnl_pct >= 0 ? "+" : "";
     tbody.innerHTML += `<tr>
-        <td>${{p.code}}</td><td>${{p.name}}</td><td>${{p.market}}</td>
+        <td>${{esc(p.code)}}</td><td>${{esc(p.name)}}</td><td>${{esc(p.market)}}</td>
         <td>${{p.shares.toLocaleString()}}</td>
         <td>${{p.cost_price.toFixed(4)}}</td><td>${{p.current_price.toFixed(4)}}</td>
         <td class="${{pnlClass}}">${{sign}}${{p.pnl_pct.toFixed(2)}}%</td>
@@ -338,7 +354,7 @@ function renderBars(containerId, data) {{
     data.forEach((d, i) => {{
         const pct = (d.value / max) * 100;
         el.innerHTML += `
-            <div class="weight-label"><span>${{d.name}}</span><span>${{d.value.toFixed(1)}}%</span></div>
+            <div class="weight-label"><span>${{esc(d.name)}}</span><span>${{d.value.toFixed(1)}}%</span></div>
             <div class="bar" style="width:${{Math.max(pct, 8)}}%;background:${{COLORS[i % COLORS.length]}}">${{d.value.toFixed(1)}}%</div>`;
     }});
 }}
@@ -350,7 +366,7 @@ const weightEl = document.getElementById("weight-bars");
 positions.forEach((p, i) => {{
     const color = p.pnl_pct >= 0 ? "#2ecc71" : "#e74c3c";
     weightEl.innerHTML += `
-        <div class="weight-label"><span>${{p.name}} (${{p.code}})</span><span>${{p.weight.toFixed(1)}}%</span></div>
+        <div class="weight-label"><span>${{esc(p.name)}} (${{esc(p.code)}})</span><span>${{p.weight.toFixed(1)}}%</span></div>
         <div class="bar" style="width:${{Math.max(p.weight, 2)}}%;background:${{color}}">${{p.weight.toFixed(1)}}%</div>`;
 }});
 
@@ -362,9 +378,9 @@ if (alerts.length === 0) {{
     alerts.forEach(a => {{
         const levelLabels = {{"CRITICAL":"严重","DANGER":"危险","WARNING":"预警"}};
         alertsEl.innerHTML += `
-            <div class="alert-item alert-${{a.level}}">
-                <span class="alert-level">[${{levelLabels[a.level] || a.level}}]</span>
-                <span>${{a.rule}}: ${{a.message}}</span>
+            <div class="alert-item alert-${{esc(a.level)}}">
+                <span class="alert-level">[${{esc(levelLabels[a.level] || a.level)}}]</span>
+                <span>${{esc(a.rule)}}: ${{esc(a.message)}}</span>
             </div>`;
     }});
 }}
@@ -376,12 +392,12 @@ if (sigKeys.length > 0) {{
     const sigEl = document.getElementById("signals-container");
     sigKeys.forEach(code => {{
         const s = signals[code];
-        sigEl.innerHTML += `<div style="font-weight:600;margin:12px 0 6px;color:#c9d1d9">${{s.name}} (${{code}})</div>`;
+        sigEl.innerHTML += `<div style="font-weight:600;margin:12px 0 6px;color:#c9d1d9">${{esc(s.name)}} (${{esc(code)}})</div>`;
         s.signals.forEach(sig => {{
             let cls = "signal-neutral";
             if (sig.includes("买入") || sig.includes("金叉") || sig.includes("超卖") || sig.includes("反弹")) cls = "signal-buy";
             if (sig.includes("卖出") || sig.includes("死叉") || sig.includes("超买") || sig.includes("回调")) cls = "signal-sell";
-            sigEl.innerHTML += `<div class="signal-item ${{cls}}">${{sig}}</div>`;
+            sigEl.innerHTML += `<div class="signal-item ${{cls}}">${{esc(sig)}}</div>`;
         }});
     }});
 }}
@@ -393,10 +409,10 @@ if (klKeys.length > 0) {{
     const klEl = document.getElementById("kline-container");
     klKeys.forEach(code => {{
         const info = klineData[code];
-        const canvasId = `kline-${{code}}`;
+        const canvasId = `kline-${{esc(code)}}`;
         klEl.innerHTML += `
             <div class="kline-section">
-                <div class="kline-title">${{info.name}} (${{code}})</div>
+                <div class="kline-title">${{esc(info.name)}} (${{esc(code)}})</div>
                 <canvas id="${{canvasId}}" width="1200" height="300"></canvas>
             </div>`;
     }});

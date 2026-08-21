@@ -41,6 +41,8 @@ TARGET_WEIGHTS = {
 STRATEGY_PARAMS = {
     "ma_period_days": 200,          # 趋势过滤：收盘低于 200 日均线则该风险腿归零
     "momentum_window_weeks": 26,    # 动量轮动：26 周收益率排序
+    "a_share_slots": 2,             # 动量轮动：A股腿入选槽位数
+    "overseas_slots": 1,            # 动量轮动：海外腿入选槽位数
     "rebalance_band": 0.20,         # 再平衡带：相对目标权重偏离 ±20% 才交易
     "drawdown_warn": 0.06,          # 回撤断路器：组合自高点回撤 6% 风险腿减半
     "drawdown_stop": 0.08,          # 回撤断路器：组合自高点回撤 8% 风险腿清零
@@ -50,6 +52,7 @@ STRATEGY_PARAMS = {
     "min_trade_amount": 2000.0,     # 交易清单：单笔金额低于 2000 元忽略
     "commission_rate": 0.00025,     # 费用估算：佣金万 2.5
     "min_commission": 5.0,          # 费用估算：最低佣金 5 元
+    "buy_price_buffer": 0.002,      # 交易清单：买入现金约束预留 0.2% 价格缓冲（滑点+费用）
     "qdii_premium_limit": 0.03,     # QDII 溢价保护：溢价超过 3% 暂停买入
     "max_data_age_days": 7,         # 数据陈旧门禁：任一腿行情超过 7 天则禁止生成交易清单
 }

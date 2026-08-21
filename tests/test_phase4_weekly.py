@@ -313,6 +313,141 @@ class Phase4WeeklyTest(unittest.TestCase):
             self.assertEqual(result["trades"][0]["shares"], 500)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertNotIn("pending_breaker_reset", state)
+            self.assertEqual(state["applied_breaker_level"], "risk_half")
+
+    def test_emergency_same_level_does_not_compound_without_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            portfolio_path = root / "portfolio.json"
+            state_path = root / "state.json"
+            report_dir = root / "reports"
+            write_portfolio(portfolio_path, [
+                position("510300", "沪深300ETF", 1000, 93.0),
+            ])
+            state_path.write_text(json.dumps({
+                "circuit_breaker_high_water": 100000.0,
+                "events": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            pm = PortfolioManager(portfolio_path)
+            first = generate_emergency_rebalance(
+                pm, as_of_date=datetime.date(2026, 7, 7),
+                state_path=state_path, report_dir=report_dir,
+            )
+            self.assertTrue(first["triggered"])
+            second = generate_emergency_rebalance(
+                pm, as_of_date=datetime.date(2026, 7, 8),
+                state_path=state_path, report_dir=report_dir,
+            )
+            # 持仓未变（清单未执行）时，同级重跑不得按剩余持仓再减半
+            self.assertFalse(second["triggered"])
+            self.assertEqual(second["trades"], [])
+            self.assertIsNotNone(second.get("note"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["applied_breaker_level"], "risk_half")
+            self.assertEqual(state["last_weekly_plan"]["trades"][0]["shares"], 500)
+
+    def test_emergency_same_level_holds_after_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            portfolio_path = root / "portfolio.json"
+            state_path = root / "state.json"
+            report_dir = root / "reports"
+            write_portfolio(portfolio_path, [
+                position("510300", "沪深300ETF", 1000, 93.0),
+            ])
+            state_path.write_text(json.dumps({
+                "circuit_breaker_high_water": 100000.0,
+                "events": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            pm = PortfolioManager(portfolio_path)
+            generate_emergency_rebalance(
+                pm, as_of_date=datetime.date(2026, 7, 7),
+                state_path=state_path, report_dir=report_dir,
+            )
+            # 模拟执行减半清单：500 份卖出所得入现金
+            write_portfolio(portfolio_path, [
+                position("510300", "沪深300ETF", 500, 93.0),
+            ], cash=46500.0)
+            pm_after = PortfolioManager(portfolio_path)
+            result = generate_emergency_rebalance(
+                pm_after, as_of_date=datetime.date(2026, 7, 8),
+                state_path=state_path, report_dir=report_dir,
+            )
+            self.assertFalse(result["triggered"])
+            self.assertEqual(result["trades"], [])
+
+    def test_emergency_escalates_from_half_to_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            portfolio_path = root / "portfolio.json"
+            state_path = root / "state.json"
+            report_dir = root / "reports"
+            write_portfolio(portfolio_path, [
+                position("510300", "沪深300ETF", 1000, 93.0),
+            ])
+            state_path.write_text(json.dumps({
+                "circuit_breaker_high_water": 100000.0,
+                "events": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            pm = PortfolioManager(portfolio_path)
+            generate_emergency_rebalance(
+                pm, as_of_date=datetime.date(2026, 7, 7),
+                state_path=state_path, report_dir=report_dir,
+            )
+            # 半仓执行后继续下跌至 ≥8% 回撤，应升级清零（卖出全部剩余风险腿）
+            write_portfolio(portfolio_path, [
+                position("510300", "沪深300ETF", 500, 90.0),
+            ], cash=46500.0)
+            pm_after = PortfolioManager(portfolio_path)
+            result = generate_emergency_rebalance(
+                pm_after, as_of_date=datetime.date(2026, 7, 8),
+                state_path=state_path, report_dir=report_dir,
+            )
+            self.assertTrue(result["triggered"])
+            self.assertEqual(result["allocation"]["drawdown"]["action"], "risk_zero")
+            self.assertEqual(result["trades"][0]["shares"], 500)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["applied_breaker_level"], "risk_zero")
+
+    def test_pending_reset_not_blocked_by_unexecuted_buy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            portfolio_path = root / "portfolio.json"
+            state_path = root / "state.json"
+            report_dir = root / "reports"
+            # 清零 SELL 已执行（持仓清空），同清单的短融 BUY 未执行
+            write_portfolio(portfolio_path, [], cash=91500.0)
+            state_path.write_text(json.dumps({
+                "circuit_breaker_high_water": 100000.0,
+                "flow_total_seen": 0.0,
+                "pending_breaker_reset": {"date": "2026-07-07", "reset_to": 91500.0},
+                "last_weekly_plan": {
+                    "trades": [
+                        {
+                            "code": "510300", "name": "沪深300ETF",
+                            "action": "SELL", "shares": 1000, "price": 91.5,
+                            "reason": "断路器清零",
+                        },
+                        {
+                            "code": "511360", "name": "短融ETF",
+                            "action": "BUY", "shares": 500, "price": 100.0,
+                            "reason": "再平衡",
+                        },
+                    ],
+                    "position_shares": {"510300": 1000, "511360": 0},
+                },
+                "events": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            pm = PortfolioManager(portfolio_path)
+            result = generate_emergency_rebalance(
+                pm, as_of_date=datetime.date(2026, 7, 8),
+                state_path=state_path, report_dir=report_dir,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertFalse(result["triggered"])
+            self.assertEqual(state["circuit_breaker_high_water"], 91500.0)
+            self.assertNotIn("pending_breaker_reset", state)
+            self.assertEqual(state["applied_breaker_level"], "none")
 
     def test_emergency_rebalance_does_not_trigger_below_warn_level(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +549,7 @@ class Phase4WeeklyTest(unittest.TestCase):
             self.assertIn(BREAKER_UNEXECUTED_WARNING, result["markdown"])
             self.assertEqual(state["circuit_breaker_high_water"], 100000.0)
             self.assertEqual(state["pending_breaker_reset"]["reset_to"], 91500.0)
+            self.assertEqual(state["applied_breaker_level"], "risk_zero")
 
     def test_weekly_pending_reset_applies_after_stop_trade_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,6 +591,7 @@ class Phase4WeeklyTest(unittest.TestCase):
             self.assertEqual(result["allocation"]["drawdown"]["action"], "none")
             self.assertEqual(state["circuit_breaker_high_water"], 91500.0)
             self.assertNotIn("pending_breaker_reset", state)
+            self.assertEqual(state["applied_breaker_level"], "none")
             self.assertEqual(state["events"][-1]["type"], "circuit_breaker_reset_after_execution")
 
     def test_pending_reset_applies_cash_flow_delta_between_trigger_and_execution(self):

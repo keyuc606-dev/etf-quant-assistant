@@ -5,12 +5,14 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from ..config import ETF_POOL, STRATEGY_PARAMS, TARGET_WEIGHTS
-from ..data.fetcher import resample_weekly
+from ..data.fetcher import cached_trade_dates, resample_weekly
 
 
-STATE_RESET_WARNING = "断路器高点已丢失重置，请人工核对"
+STATE_RESET_WARNING = ("断路器高点丢失已重置为当前净值；若此前处于断路器保护期，"
+                       "请人工核对历史高点后再执行买入类清单")
 STOP_RESET_MESSAGE = "断路器清零触发，高点已重置至当前净值，后续按趋势规则重建"
 STOP_PENDING_MESSAGE = "断路器清零触发，等待确认卖出执行后重置高点"
+ZERO_ASSETS_WARNING = "总资产 ≤ 0（持仓价格或现金数据异常），断路器不判定，请核对 portfolio.json"
 
 A_SHARE_LEG = ["510300", "512890", "510500"]
 OVERSEAS_LEG = ["513100", "513500"]
@@ -40,6 +42,13 @@ def compute_allocation(market_data: Dict[str, pd.DataFrame],
     state_info = _prepare_state(state, total_assets, as_of_date, cumulative_cash_flow)
 
     warnings = list(state_info["warnings"])
+    if params.get("disable_trend_filter"):
+        warnings.append("趋势过滤已被 disable_trend_filter 关闭，清单不代表完整规则")
+    if params.get("disable_circuit_breaker"):
+        warnings.append("回撤断路器已被 disable_circuit_breaker 关闭，清单不代表完整规则")
+    warnings.extend(_validate_target_weights(target_weights, params))
+    if float(total_assets or 0.0) <= 0:
+        warnings.append(ZERO_ASSETS_WARNING)
     trend_status = {}
     premium_status = {}
     stale_codes = []
@@ -59,6 +68,12 @@ def compute_allocation(market_data: Dict[str, pd.DataFrame],
             age_days = (recent_day - last_date).days
             if age_days > params["max_data_age_days"]:
                 stale_codes.append(code)
+            elif last_date < recent_day:
+                # 未到陈旧门禁但落后最近交易日：周五盘后数据未发布时信号会静默基于前一日
+                warnings.append(
+                    f"{code} {ETF_POOL[code]['name']} 数据日期 {last_date.isoformat()} "
+                    f"落后最近交易日 {recent_day.isoformat()}，信号基于该日数据"
+                )
 
         status, close, ma_value = _trend_signal(
             df,
@@ -80,10 +95,12 @@ def compute_allocation(market_data: Dict[str, pd.DataFrame],
     overseas_budget = sum(float(target_weights.get(code, 0.0)) for code in OVERSEAS_LEG)
 
     a_selected, a_ranking, a_unallocated = _allocate_momentum_leg(
-        A_SHARE_LEG, a_budget, 2, market_data, trend_status, params, target_weights
+        A_SHARE_LEG, a_budget, int(params.get("a_share_slots", 2)), market_data,
+        trend_status, params, target_weights
     )
     overseas_selected, overseas_ranking, overseas_unallocated = _allocate_momentum_leg(
-        OVERSEAS_LEG, overseas_budget, 1, market_data, trend_status, params, target_weights,
+        OVERSEAS_LEG, overseas_budget, int(params.get("overseas_slots", 1)), market_data,
+        trend_status, params, target_weights,
         premium_status=premium_status,
     )
 
@@ -103,11 +120,11 @@ def compute_allocation(market_data: Dict[str, pd.DataFrame],
             released += old_weight - new_weight
             weights[code] = new_weight
         weights[SHORT_BOND_CODE] += released
-        if drawdown["action"] == "risk_zero":
+        if drawdown["action"] == "risk_zero" and float(total_assets or 0.0) > 0:
             warnings.append(STOP_PENDING_MESSAGE)
             state_info["state_updates"]["pending_breaker_reset"] = {
                 "date": as_of_date.isoformat(),
-                "reset_to": float(total_assets or 0.0),
+                "reset_to": float(total_assets),
             }
 
     weights = _round_weights(weights)
@@ -185,10 +202,43 @@ def _prepare_state(state: Optional[dict], total_assets: float,
 
 
 def _last_completed_trading_day(as_of_date: datetime.date) -> datetime.date:
+    trade_dates = cached_trade_dates()
     d = as_of_date
+    if trade_dates is not None:
+        while d.isoformat() not in trade_dates and d > as_of_date - datetime.timedelta(days=40):
+            d -= datetime.timedelta(days=1)
+        return d
     while d.weekday() >= 5:
         d -= datetime.timedelta(days=1)
     return d
+
+
+def _validate_target_weights(target_weights: dict, params: dict) -> List[str]:
+    """启动期校验：权重和为 1、每腿候选权重与槽位数一致，不一致即告警。"""
+    issues = []
+    known = set(ETF_POOL) | {SHORT_BOND_CODE, TREASURY_CODE, GOLD_CODE}
+    unknown = [code for code in target_weights if code not in known]
+    if unknown:
+        issues.append(f"TARGET_WEIGHTS 含未知标的 {sorted(unknown)}，将被忽略")
+    total = sum(float(w or 0.0) for code, w in target_weights.items() if code in known)
+    if abs(total - 1.0) > 0.000001:
+        issues.append(f"TARGET_WEIGHTS 合计 {total:.4f} ≠ 1.0，目标权重不可信")
+    for leg_name, codes, slots in (
+        ("A股腿", A_SHARE_LEG, int(params.get("a_share_slots", 2))),
+        ("海外腿", OVERSEAS_LEG, int(params.get("overseas_slots", 1))),
+    ):
+        leg_weights = [float(target_weights.get(code, 0.0) or 0.0) for code in codes]
+        candidates = [w for w in leg_weights if w > 0]
+        if not candidates:
+            continue
+        if len(candidates) < slots:
+            issues.append(f"{leg_name}仅 {len(candidates)} 个非零权重候选，少于槽位数 {slots}")
+        if max(candidates) - min(candidates) > 0.000001:
+            issues.append(
+                f"{leg_name}候选权重不相等（{['%.4f' % w for w in candidates]}），"
+                "与按槽均分的预算语义不符，请核对 TARGET_WEIGHTS"
+            )
+    return issues
 
 
 def _business_days_between(start_date: datetime.date, end_date: datetime.date) -> int:
@@ -289,13 +339,15 @@ def _allocate_momentum_leg(codes: List[str], budget: float, slots: int,
     eligible_rows = [row for row in ranking if row["eligible"]]
     eligible_rows.sort(key=lambda row: row["momentum"], reverse=True)
     selectable_rows = [row for row in eligible_rows if row.get("selection_eligible", True)]
-    blocked_budget = sum(
-        float(target_weights.get(code, 0.0))
-        for code in codes
-        if not trend_status.get(code, {}).get("tradable")
+    # 槽位按"配置了权重却被趋势过滤掉的候选个数"释放。禁止用 权重预算÷单槽权重
+    # 折算——那隐含候选权重恰好相等的假设，权重再配置后会静默算错目标权重。
+    blocked_slots = sum(
+        1 for code in codes
+        if float(target_weights.get(code, 0.0)) > 0
+        and not trend_status.get(code, {}).get("tradable")
     )
+    available_slots = max(0, slots - blocked_slots)
     slot_weight = budget / slots if slots else 0.0
-    available_slots = max(0, slots - int(round(blocked_budget / slot_weight))) if slot_weight else 0
     selected = selectable_rows[:available_slots]
     selected_codes = {row["code"] for row in selected}
 
@@ -379,7 +431,10 @@ def _drawdown_record(total_assets: float, high_water: float, params: dict) -> di
     if high_water > 0:
         drawdown_pct = max(0.0, (high_water - float(total_assets or 0.0)) / high_water)
     action = "none"
-    if params.get("disable_circuit_breaker"):
+    if float(total_assets or 0.0) <= 0:
+        # 总资产为 0 多为持仓价格未维护/数据异常，按 100% 回撤清零属假触发
+        action = "none"
+    elif params.get("disable_circuit_breaker"):
         action = "none"
     elif drawdown_pct >= params["drawdown_stop"]:
         action = "risk_zero"
