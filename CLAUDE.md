@@ -95,7 +95,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 3. `.venv/bin/python -m quant_assistant weekly`，与上期周报关键输出对比
 4. 若异常，回滚到 `requirements.txt` 锁定版本，并在项目记录中注明异常接口、版本和处理方式
 
-Python 3.9 已过官方 EOL；本次不做运行时迁移，下次大版本升级建议迁移到 Python 3.12。
+Python 3.9 已过官方 EOL；v1.3.0 起运行时迁移到 Python 3.12（CI 矩阵同步收窄），因可用的 akshare（≥1.18.90，修复净值接口解析）要求 Python ≥3.11。
 
 ## 修改代码的约束
 
