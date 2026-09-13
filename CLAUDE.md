@@ -3,7 +3,7 @@
 股票量化分析系统（回测 / 组合风控 / 选股筛选）。**无实盘下单，无 API 密钥。**
 数据源为免费 akshare（爬东财），本地长期缓存，接口挂了自动降级为离线模式。
 
-## 固定命令（日常只需这六条）
+## 固定命令
 
 ```bash
 cd ~/projects/quant-assistant
@@ -25,6 +25,12 @@ python3 -m quant_assistant weekly
 
 # 6. ETF 组合级回测：周度配置策略三组/四组对照
 python3 -m quant_assistant backtest-portfolio --start 2016-01-01
+
+# 7. 本地成交台账（首次使用先初始化；不会伪造历史成交）
+.venv\Scripts\python.exe -m quant_assistant portfolio-reconcile --initialize
+.venv\Scripts\python.exe -m quant_assistant record-trade BUY 510300 1000 4.125 --fee 5
+.venv\Scripts\python.exe -m quant_assistant trade-history --limit 20
+.venv\Scripts\python.exe -m quant_assistant portfolio-reconcile
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -38,12 +44,14 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `quant_assistant/backtest/` | 回测引擎、指标计算、HTML 报告 |
 | `quant_assistant/screening/` | 观察池、过滤器、评分 |
 | `quant_assistant/config.py` | 所有手工维护的配置（见下） |
-| `data/portfolio.json` | 唯一持仓数据文件 |
+| `data/trading.sqlite3` | 本地初始快照与成交事实源 |
+| `data/portfolio.json` | daily/weekly/dashboard 使用的兼容持仓投影 |
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
 ## 数据文件与缓存机制
 
 - **portfolio.json**：持仓列表。字段见 `data/portfolio.example.json`。港股 `current_price`/`cost_price` 填**港币原价**，系统按 `config.FX_RATES` 自动折算人民币。每次保存自动生成 `portfolio.json.bak`；文件损坏时程序报错并把原文件改名 `*.corrupt-<时间戳>`，用 `.bak` 恢复即可。
+- **trading.sqlite3**：初始化快照之后的本地成交事实源；普通买卖不写 `cash_events`。每次成交成功后同步生成兼容的 `portfolio.json`。详细设计见 `docs/DESIGN-trading-ledger.md`。
 - **缓存**：每标的一份 `data/cache/{code}_daily.csv`。缓存覆盖到最近收盘交易日则不联网；否则重拉全段（qfq 复权基准保持一致）。**akshare 失败时自动用旧缓存并打印「数据截止 X（离线模式）」**——看到这个提示说明数据不是最新的，不是故障。
 
 ## 手工维护项（数据会过期，改这里）

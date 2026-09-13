@@ -7,6 +7,9 @@
   python -m quant_assistant screen                # 多因子选股筛选
   python -m quant_assistant dashboard             # 仅生成仪表盘（离线可用）
   python -m quant_assistant plan / weekly         # ETF 周报与本周交易清单
+  python -m quant_assistant record-trade          # 本地录入 ETF 成交
+  python -m quant_assistant trade-history         # 查看本地成交台账
+  python -m quant_assistant portfolio-reconcile   # 核对 SQLite 与持仓投影
 """
 import sys
 import argparse
@@ -262,6 +265,82 @@ def cmd_weekly(args):
     cmd_plan(args)
 
 
+def cmd_record_trade(args):
+    from .trading.service import TradingService
+
+    result = TradingService().record_trade(
+        side=args.side,
+        code=args.code,
+        quantity=args.quantity,
+        price=args.price,
+        fee=args.fee,
+        external_id=args.external_id,
+        source=args.source,
+        related_plan_id=args.related_plan_id,
+        note=args.note,
+        executed_at=args.executed_at,
+    )
+    execution = result.execution
+    status = "重复 external_id，未重复记账" if result.duplicate else "成交已记账"
+    print(f"{status}: {execution['execution_id']}")
+    print(
+        f"{execution['side']} {execution['code']} {execution['quantity']} 份 @ "
+        f"￥{execution['price']:.4f}，费用 ￥{execution['fee']:.2f}"
+    )
+    print(f"成交后现金: ￥{result.cash:,.2f}")
+    print(f"成交后持仓: {result.quantity} 份，平均成本 ￥{result.average_cost:.6f}")
+    if execution["side"] == "SELL":
+        print(f"本笔已实现盈亏: ￥{execution['realized_pnl']:+,.2f}")
+
+
+def cmd_trade_history(args):
+    from tabulate import tabulate
+
+    from .trading.service import TradingService
+
+    executions = TradingService().recent_executions(args.limit)
+    if not executions:
+        print("暂无成交记录")
+        return
+    rows = []
+    for item in executions:
+        pnl = item["realized_pnl"]
+        rows.append([
+            item["executed_at"], item["side"], item["code"], item["quantity"],
+            f"{item['price']:.4f}", f"{item['fee']:.2f}",
+            "-" if pnl is None else f"{pnl:+.2f}", item["source"],
+            item["external_id"] or "-",
+        ])
+    print(tabulate(
+        rows,
+        headers=["成交时间", "方向", "代码", "数量", "价格", "费用", "已实现盈亏", "来源", "external_id"],
+        tablefmt="grid",
+    ))
+
+
+def cmd_portfolio_reconcile(args):
+    from .trading.service import TradingService
+
+    service = TradingService()
+    if args.initialize:
+        if service.is_initialized():
+            print("成交台账已经初始化，未重复导入")
+        else:
+            summary = service.initialize_from_portfolio()
+            print(
+                f"初始快照已导入: 现金 ￥{summary['cash']:,.2f}，"
+                f"持仓 {summary['positions']} 项，历史成交 0 笔"
+            )
+    result = service.reconcile(repair=args.repair)
+    if result["ok"]:
+        suffix = "（已修复 portfolio.json）" if result["repaired"] else ""
+        print(f"portfolio-reconcile: OK{suffix}")
+        return
+    print("portfolio-reconcile: MISMATCH")
+    for difference in result["differences"]:
+        print(f"- {difference}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="quant_assistant",
                                      description="股票量化分析系统（回测/组合/选股，无实盘下单）")
@@ -301,6 +380,34 @@ def main():
 
     p_weekly = sub.add_parser("weekly", help="ETF 周报与本周交易清单")
     p_weekly.set_defaults(func=cmd_weekly)
+
+    p_trade = sub.add_parser("record-trade", help="将人工确认的 ETF 成交写入本地台账")
+    p_trade.add_argument("side", choices=["BUY", "SELL"], help="成交方向")
+    p_trade.add_argument("code", help="项目 ETF 池中的六位代码")
+    p_trade.add_argument("quantity", type=int, help="成交份额（正整数）")
+    p_trade.add_argument("price", type=float, help="成交单价（大于0）")
+    p_trade.add_argument("--fee", type=float, default=0.0, help="成交费用（默认0）")
+    p_trade.add_argument("--external-id", help="外部成交编号；重复提交保持幂等")
+    p_trade.add_argument("--source", default="manual", help="记录来源（默认manual）")
+    p_trade.add_argument("--related-plan-id", help="关联的计划编号")
+    p_trade.add_argument("--note", help="备注")
+    p_trade.add_argument("--executed-at", help="成交时间 ISO-8601；默认当前时间")
+    p_trade.set_defaults(func=cmd_record_trade)
+
+    p_history = sub.add_parser("trade-history", help="查看最近的本地成交记录")
+    p_history.add_argument("--limit", type=int, default=20, help="返回条数（默认20）")
+    p_history.set_defaults(func=cmd_trade_history)
+
+    p_reconcile = sub.add_parser("portfolio-reconcile", help="核对 SQLite 与 portfolio.json 投影")
+    p_reconcile.add_argument(
+        "--initialize", action="store_true",
+        help="首次使用时将当前 portfolio.json 导入为初始快照，不生成历史成交",
+    )
+    p_reconcile.add_argument(
+        "--repair", action="store_true",
+        help="发现差异时用 SQLite 重建结果修复 portfolio.json",
+    )
+    p_reconcile.set_defaults(func=cmd_portfolio_reconcile)
 
     args = parser.parse_args()
     try:
