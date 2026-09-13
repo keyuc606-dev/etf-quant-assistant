@@ -375,8 +375,8 @@ def render_emergency_markdown(as_of_date: datetime.date,
         "## 触发状态",
         "",
         f"- 动作: {drawdown['action']}",
-        f"- 当前净值: ¥{drawdown['current_nav']:,.0f}",
-        f"- 历史高点: ¥{drawdown['high_water']:,.0f}",
+        f"- 当前净值: ￥{drawdown['current_nav']:,.0f}",
+        f"- 历史高点: ￥{drawdown['high_water']:,.0f}",
         f"- 当前回撤: {drawdown['drawdown_pct']:.2%}",
         "",
         "## 卖出清单",
@@ -393,7 +393,7 @@ def render_emergency_markdown(as_of_date: datetime.date,
             lines.append(
                 f"| {trade['category']} | 卖出 | {trade['code']} | {trade['name']} | "
                 f"{trade['shares']:,} | {trade['price']:.4f} | "
-                f"¥{trade['amount']:,.0f} | ¥{trade['estimated_fee']:,.2f} | "
+                f"￥{trade['amount']:,.0f} | ￥{trade['estimated_fee']:,.2f} | "
                 f"{trade['reason']} |"
             )
         lines.append("")
@@ -414,7 +414,7 @@ def print_emergency_summary(result: dict) -> None:
         print(
             f"  - 卖出 {trade['code']} {trade['name']} "
             f"{trade['shares']:,} 份，参考价 {trade['price']:.4f}，"
-            f"金额约 ¥{trade['amount']:,.0f}；{trade['reason']}"
+            f"金额约 ￥{trade['amount']:,.0f}；{trade['reason']}"
         )
     print(f"  Markdown: {result['report_path']}")
 
@@ -639,8 +639,8 @@ def _portfolio_section(pm: PortfolioManager, allocation: dict) -> List[str]:
     lines = [
         "## 组合状态",
         "",
-        f"- 总资产: ¥{pm.total_assets:,.0f}",
-        f"- 现金: ¥{pm.cash:,.0f}",
+        f"- 总资产: ￥{pm.total_assets:,.0f}",
+        f"- 现金: ￥{pm.cash:,.0f}",
         "",
         "| 代码 | 名称 | 当前权重 | 目标权重 | 趋势状态 | 数据日期 |",
         "|---|---:|---:|---:|---|---|",
@@ -666,8 +666,8 @@ def _drawdown_section(allocation: dict) -> List[str]:
     return [
         "## 回撤水位",
         "",
-        f"- 当前净值: ¥{drawdown['current_nav']:,.0f}",
-        f"- 历史高点: ¥{drawdown['high_water']:,.0f}",
+        f"- 当前净值: ￥{drawdown['current_nav']:,.0f}",
+        f"- 历史高点: ￥{drawdown['high_water']:,.0f}",
         f"- 当前回撤: {current:.2%}",
         f"- 距 6% 断路器: {max(0.0, warn - current):.2%}",
         f"- 距 8% 断路器: {max(0.0, stop - current):.2%}",
@@ -708,8 +708,8 @@ def _trades_section(plan: dict, migration: dict) -> List[str]:
         "",
         f"- {plan.get('execution_note', '执行顺序：先卖出后买入')}",
         f"- 迁移进度: 已完成 {migration['completed_weeks']} 周；"
-        f"当前目标池外剩余约 ¥{migration['remaining_value']:,.0f}，"
-        f"估算剩余 {migration['remaining_weeks']} 周；本周迁移金额 ¥{migration['this_week_migration']:,.0f}",
+        f"当前目标池外剩余约 ￥{migration['remaining_value']:,.0f}，"
+        f"估算剩余 {migration['remaining_weeks']} 周；本周迁移金额 ￥{migration['this_week_migration']:,.0f}",
         "",
     ]
     if plan.get("blocked"):
@@ -726,8 +726,8 @@ def _trades_section(plan: dict, migration: dict) -> List[str]:
             lines.append(
                 f"| {trade['category']} | {'买入' if trade['action'] == 'BUY' else '卖出'} | "
                 f"{trade['code']} | {trade['name']} | {trade['shares']:,} | "
-                f"{trade['price']:.4f} | ¥{trade['amount']:,.0f} | "
-                f"¥{trade['estimated_fee']:,.2f} | {trade['reason']} |"
+                f"{trade['price']:.4f} | ￥{trade['amount']:,.0f} | "
+                f"￥{trade['estimated_fee']:,.2f} | {trade['reason']} |"
             )
         lines.append("")
     if plan.get("skipped"):
@@ -747,7 +747,7 @@ def _discipline_section(execution_check: dict) -> List[str]:
     if not unexecuted:
         lines.extend(["- 上期清单已按份额变化核对，未发现明显未执行项。", ""])
         return lines
-    lines.append(f"- [黄字警告] 上周清单存在 {len(unexecuted)} 项疑似未执行，最大偏离约 ¥{execution_check['max_deviation']:,.0f}。")
+    lines.append(f"- [黄字警告] 上周清单存在 {len(unexecuted)} 项疑似未执行，最大偏离约 ￥{execution_check['max_deviation']:,.0f}。")
     lines.extend([
         "",
         "| 代码 | 名称 | 方向 | 计划份额 | 上期份额 | 当前份额 | 偏离金额 |",
@@ -757,7 +757,7 @@ def _discipline_section(execution_check: dict) -> List[str]:
         lines.append(
             f"| {item['code']} | {item['name']} | {item['action']} | "
             f"{item['planned_shares']:,} | {item['before_shares']:,} | "
-            f"{item['current_shares']:,} | ¥{item['deviation_amount']:,.0f} |"
+            f"{item['current_shares']:,} | ￥{item['deviation_amount']:,.0f} |"
         )
     lines.append("")
     return lines

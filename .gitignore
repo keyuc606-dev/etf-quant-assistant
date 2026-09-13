@@ -18,6 +18,12 @@ data/portfolio.json
 data/portfolio.json.bak
 data/*.json.tmp
 data/*.corrupt-*
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
+data/*.sqlite3
+data/*.sqlite3-*
 data/state.json
 data/cache/*
 !data/cache/.gitkeep

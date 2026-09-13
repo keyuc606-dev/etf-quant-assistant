@@ -83,9 +83,9 @@ class PortfolioAnalyzer:
 
         total_pnl = total_mv - total_cost
         total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0
-        print(f"\n  总资产: ¥{total_assets:,.0f}  |  持仓市值: ¥{total_mv:,.0f}  |  "
-              f"现金: ¥{self.pm.cash:,.0f}  |  总成本: ¥{total_cost:,.0f}  |  "
-              f"总盈亏: ¥{total_pnl:+,.0f} ({total_pnl_pct:+.2%})")
+        print(f"\n  总资产: ￥{total_assets:,.0f}  |  持仓市值: ￥{total_mv:,.0f}  |  "
+              f"现金: ￥{self.pm.cash:,.0f}  |  总成本: ￥{total_cost:,.0f}  |  "
+              f"总盈亏: ￥{total_pnl:+,.0f} ({total_pnl_pct:+.2%})")
 
     def fundamental_analysis(self) -> list[dict]:
         """估值偏离分析：对比每只股票与行业中枢"""

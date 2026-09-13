@@ -10,7 +10,7 @@ MISSING_DATA_BLOCK_MESSAGE = "行情数据缺失（{codes}），禁止按此清�
 INSUFFICIENT_CASH_REASON = "本周可用资金不足，待后续迁移回款后补足"
 EXECUTION_ORDER_NOTE = "执行顺序：先卖出后买入"
 QDII_CODES = {"513100", "513500"}
-QDII_UNKNOWN_PREMIUM_NOTE = "⚠ 买入前请在天天基金页面人工核对溢价"
+QDII_UNKNOWN_PREMIUM_NOTE = "[警告] 买入前请在天天基金页面人工核对溢价"
 
 
 def generate_rebalance_plan(target_weights: Dict[str, float],

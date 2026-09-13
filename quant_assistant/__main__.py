@@ -87,7 +87,7 @@ def cmd_daily(args):
         print("\n  风控检查通过，无告警")
 
     if result["fetch_errors"]:
-        print(f"\n  ⚠ 以下标的行情获取失败（用旧价格计算）: {', '.join(result['fetch_errors'])}")
+        print(f"\n  [警告] 以下标的行情获取失败（用旧价格计算）: {', '.join(result['fetch_errors'])}")
 
     dashboard_alerts = []
     if emergency.get("triggered"):
@@ -155,10 +155,10 @@ def cmd_backtest_portfolio(args):
         from .weekly import load_etf_market_data
         market_data, _prices, md_warnings = load_etf_market_data()
         if not market_data:
-            print("\n⚠ --market 市价模式需要 data/cache/{code}_daily.csv（先运行 bootstrap_etf_cache.py），本次跳过。")
+            print("\n[警告] --market 市价模式需要 data/cache/{code}_daily.csv（先运行 bootstrap_etf_cache.py），本次跳过。")
         else:
             for warning in md_warnings:
-                print(f"  ⚠ {warning}")
+                print(f"  [警告] {warning}")
             market_result = engine.run(
                 nav_data=nav_data, start_date=start_date,
                 variant="full", market_data=market_data,

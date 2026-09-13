@@ -6,8 +6,8 @@
 
 1. 联网调用只允许出现在 `quant_assistant/data/fetcher.py`，其他模块必须离线可用。
 2. 不引入收费数据接口，不加实盘下单功能。
-3. Python 3.9 兼容：类型注解用 `Optional[X]`/`List[X]`，不用 `X | None`，不用 `match`。
-4. 运行与自测一律用项目内 `.venv/bin/python`，不改系统环境。
+3. Python 3.12 是正式运行基线（与 CI 和当前 akshare 要求一致）。
+4. Windows 运行与自测一律用项目内 `.venv\Scripts\python.exe`，不使用系统 Python，不修改系统环境。
 5. 现有 CLI 命令（daily / backtest / screen / dashboard）在任何阶段都必须保持可用。
 6. 交易清单只能由规则生成，定性内容只能进报告附注区。
 7. 大改动分期进行：每期完成后 git commit、输出变更清单和自测结果，等待人工验收后再继续。
