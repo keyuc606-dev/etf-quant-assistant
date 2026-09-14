@@ -1,0 +1,53 @@
+name: Account Daily Telegram
+
+"on":
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions cron uses UTC. 01:20 UTC = 09:20 Asia/Shanghai.
+    - cron: "20 1 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: account-daily-telegram
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Restore last confirmed account snapshot
+        env:
+          ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
+        run: python -m quant_assistant.cloud_snapshot restore
+
+      - name: Generate and send account daily report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m quant_assistant notify-daily
+
+      - name: Remove sensitive runtime files
+        if: always()
+        shell: bash
+        run: |
+          rm -f data/portfolio.json data/portfolio.json.bak data/portfolio.json.tmp
+          rm -f data/trading.sqlite3 data/trading.sqlite3-shm data/trading.sqlite3-wal
+          rm -f data/reports/my-portfolio-daily.md data/reports/my-portfolio-detail.md

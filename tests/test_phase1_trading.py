@@ -230,7 +230,7 @@ class TradingServiceTest(unittest.TestCase):
     def test_invalid_trade_parameters_do_not_modify_data(self):
         before = self.portfolio_path.read_bytes()
         invalid = [
-            ("BUY", "000001", 100, 4.0, 0.0),
+            ("BUY", "123456", 100, 4.0, 0.0),
             ("BUY", "510300", 0, 4.0, 0.0),
             ("BUY", "510300", 100, 0.0, 0.0),
             ("BUY", "510300", 100, 4.0, -1.0),

@@ -31,7 +31,8 @@ def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
 
     total_mv = pm.total_market_value
     total_assets = pm.total_assets
-    total_cost = pm.total_cost
+    priced_positions = [pos for pos in pm.positions if pos.current_price > 0]
+    total_cost = sum(pos.cost_value for pos in priced_positions)
     total_pnl = total_mv - total_cost
     total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0
 
@@ -43,6 +44,7 @@ def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
     positions_json = []
     for pos in sorted(pm.positions, key=lambda p: p.market_value, reverse=True):
         weight = pos.market_value / total_assets * 100 if total_assets > 0 else 0
+        price_available = pos.current_price > 0
         positions_json.append({
             "code": pos.code,
             "name": pos.name,
@@ -54,6 +56,7 @@ def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
             "pnl_amount": round(pos.profit_loss_amount, 0),
             "weight": round(weight, 1),
             "market_value": round(pos.market_value, 0),
+            "price_available": price_available,
         })
 
     market_dist_json = [{"name": k, "value": round(v * 100, 1)} for k, v in market_dist.items()]
@@ -129,6 +132,7 @@ def generate_dashboard(pm: PortfolioManager, stock_data: Optional[dict] = None,
         num_danger=sum(1 for a in alerts if a.level == "DANGER"),
         num_warning=sum(1 for a in alerts if a.level == "WARNING"),
         num_critical=sum(1 for a in alerts if a.level == "CRITICAL"),
+        unpriced_count=len(pm.positions) - len(priced_positions),
         top_alerts=_json_for_script(top_alerts or []),
     )
 
@@ -151,6 +155,8 @@ def _build_html(**ctx) -> str:
     pnl_sign = "+" if ctx["total_pnl"] >= 0 else ""
     hhi_label = "高度集中" if ctx["hhi"] > 2500 else ("中度集中" if ctx["hhi"] > 1500 else "分散")
     hhi_color = "#e74c3c" if ctx["hhi"] > 2500 else ("#f39c12" if ctx["hhi"] > 1500 else "#2ecc71")
+    asset_label = "已定价总资产" if ctx["unpriced_count"] else "总资产"
+    unpriced_suffix = f" / 未定价 {ctx['unpriced_count']} 项" if ctx["unpriced_count"] else ""
 
     return f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -232,9 +238,9 @@ canvas {{ display: block; }}
 
 <div class="summary-cards">
     <div class="card">
-        <div class="label">总资产</div>
+        <div class="label">{asset_label}</div>
         <div class="value" style="color:#fff">¥{ctx["total_assets"]:,.0f}</div>
-        <div class="sub">持仓 ¥{ctx["total_mv"]:,.0f} / 现金 ¥{ctx["cash"]:,.0f}</div>
+        <div class="sub">持仓 ¥{ctx["total_mv"]:,.0f} / 现金 ¥{ctx["cash"]:,.0f}{unpriced_suffix}</div>
     </div>
     <div class="card">
         <div class="label">总盈亏</div>
@@ -334,15 +340,15 @@ if (topAlerts.length > 0) {{
 // Positions table
 const tbody = document.getElementById("positions-table");
 positions.forEach(p => {{
-    const pnlClass = p.pnl_pct >= 0 ? "pos" : "neg";
-    const sign = p.pnl_pct >= 0 ? "+" : "";
+    const pnlClass = !p.price_available ? "" : (p.pnl_pct >= 0 ? "pos" : "neg");
+    const sign = p.price_available && p.pnl_pct >= 0 ? "+" : "";
     tbody.innerHTML += `<tr>
         <td>${{esc(p.code)}}</td><td>${{esc(p.name)}}</td><td>${{esc(p.market)}}</td>
         <td>${{p.shares.toLocaleString()}}</td>
-        <td>${{p.cost_price.toFixed(4)}}</td><td>${{p.current_price.toFixed(4)}}</td>
-        <td class="${{pnlClass}}">${{sign}}${{p.pnl_pct.toFixed(2)}}%</td>
-        <td class="${{pnlClass}}">${{sign}}${{p.pnl_amount.toLocaleString()}}</td>
-        <td>${{p.weight.toFixed(1)}}%</td>
+        <td>${{p.cost_price.toFixed(4)}}</td><td>${{p.price_available ? p.current_price.toFixed(4) : "不可用"}}</td>
+        <td class="${{pnlClass}}">${{p.price_available ? sign + p.pnl_pct.toFixed(2) + "%" : "-"}}</td>
+        <td class="${{pnlClass}}">${{p.price_available ? sign + p.pnl_amount.toLocaleString() : "-"}}</td>
+        <td>${{p.price_available ? p.weight.toFixed(1) + "%" : "-"}}</td>
     </tr>`;
 }});
 

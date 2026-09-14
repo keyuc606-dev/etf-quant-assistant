@@ -61,18 +61,18 @@ class PortfolioAnalyzer:
     def print_dashboard(self):
         total_mv = self.pm.total_market_value
         total_assets = self.pm.total_assets
-        total_cost = self.pm.total_cost
 
         table_data = []
         for pos in sorted(self.pm.positions, key=lambda p: p.market_value, reverse=True):
             weight = pos.market_value / total_assets * 100 if total_assets > 0 else 0
+            price_available = pos.current_price > 0
             table_data.append([
                 pos.code, pos.name, pos.market.value,
                 f"{pos.shares:,}", f"{pos.cost_price:.4f}",
-                f"{pos.current_price:.4f}",
-                f"{pos.profit_loss_pct:+.2%}",
-                f"{pos.profit_loss_amount:+,.0f}",
-                f"{weight:.1f}%",
+                f"{pos.current_price:.4f}" if price_available else "不可用",
+                f"{pos.profit_loss_pct:+.2%}" if price_available else "-",
+                f"{pos.profit_loss_amount:+,.0f}" if price_available else "-",
+                f"{weight:.1f}%" if price_available else "-",
             ])
 
         headers = ["代码", "名称", "市场", "持股", "成本", "现价", "盈亏%", "盈亏额", "仓位"]
@@ -81,11 +81,16 @@ class PortfolioAnalyzer:
         print("=" * 80)
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
 
-        total_pnl = total_mv - total_cost
-        total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0
+        priced = [pos for pos in self.pm.positions if pos.current_price > 0]
+        priced_cost = sum(pos.cost_value for pos in priced)
+        total_pnl = total_mv - priced_cost
+        total_pnl_pct = total_pnl / priced_cost if priced_cost > 0 else 0
+        unavailable = len(self.pm.positions) - len(priced)
         print(f"\n  总资产: ￥{total_assets:,.0f}  |  持仓市值: ￥{total_mv:,.0f}  |  "
-              f"现金: ￥{self.pm.cash:,.0f}  |  总成本: ￥{total_cost:,.0f}  |  "
+              f"现金: ￥{self.pm.cash:,.0f}  |  已定价持仓成本: ￥{priced_cost:,.0f}  |  "
               f"总盈亏: ￥{total_pnl:+,.0f} ({total_pnl_pct:+.2%})")
+        if unavailable:
+            print(f"  注: {unavailable} 项持仓无有效行情，未计入市值、盈亏和仓位统计")
 
     def fundamental_analysis(self) -> list[dict]:
         """估值偏离分析：对比每只股票与行业中枢"""

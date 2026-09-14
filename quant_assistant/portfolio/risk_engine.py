@@ -44,6 +44,8 @@ class StopLossRule(RiskRule):
     def check(self, pm) -> List[RiskAlert]:
         alerts = []
         for pos in pm.positions:
+            if pos.current_price <= 0:
+                continue
             if pos.profit_loss_pct < self.threshold:
                 alerts.append(RiskAlert(
                     level=self.level,
@@ -77,6 +79,9 @@ class MarketConcentrationRule(RiskRule):
 
 class TotalLossRule(RiskRule):
     def check(self, pm) -> List[RiskAlert]:
+        # 任一持仓没有有效市价时，总资产和总盈亏均不完整，不能据此触发止损。
+        if any(pos.current_price <= 0 for pos in pm.positions):
+            return []
         alerts = []
         total_assets = pm.total_assets
         total_cost_basis = pm.total_cost + pm.cash
@@ -113,6 +118,24 @@ class ForbiddenPoolRule(RiskRule):
         return alerts
 
 
+class MarketDataAvailabilityRule(RiskRule):
+    """未知市价必须显式告警，且不得被解释成价格为零。"""
+
+    def __init__(self):
+        super().__init__("行情数据不可用", "WARNING", 0)
+
+    def check(self, pm) -> List[RiskAlert]:
+        return [
+            RiskAlert(
+                level=self.level,
+                rule_name=self.name,
+                message=f"{pos.name}({pos.code}) 尚无有效公开行情，暂不计算盈亏和价格类风控",
+                stock_code=pos.code,
+            )
+            for pos in pm.positions if pos.current_price <= 0
+        ]
+
+
 class RiskEngine:
 
     def __init__(self):
@@ -128,6 +151,7 @@ class RiskEngine:
             MarketConcentrationRule("港股占比上限", "WARNING", RISK_DEFAULTS["market_hk_max"]),
             TotalLossRule("总亏损限制", "CRITICAL", RISK_DEFAULTS["total_loss_limit"]),
             ForbiddenPoolRule(),
+            MarketDataAvailabilityRule(),
         ]
 
     def run_all_checks(self, pm) -> List[RiskAlert]:

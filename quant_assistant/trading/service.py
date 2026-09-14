@@ -1,20 +1,24 @@
 import datetime
 import json
 import os
+import re
 import shutil
-import sqlite3
 import uuid
-from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..config import DATA_DIR, ETF_POOL
+from ..news.themes import ACCOUNT_THEME_MAP
 from ..portfolio.holdings import PortfolioManager
-from .database import TradingDatabase
+from .models import TradeResult
+from .repository import TradingRepository
+from .sqlite_repository import SQLiteTradingRepository
 
 
 MONEY_EPSILON = Decimal("0.0000001")
+ETF_CODE_PATTERN = re.compile(r"^(?:15|16|18|50|51|52|56|58)\d{4}$")
+STOCK_CODE_PATTERN = re.compile(r"^(?:00|30|60|68)\d{4}$")
 
 
 def _decimal(value) -> Decimal:
@@ -25,67 +29,59 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-@dataclass
-class TradeResult:
-    execution: dict
-    cash: float
-    quantity: int
-    average_cost: float
-    duplicate: bool = False
-
-
 class TradingService:
     """SQLite 成交事实源与 portfolio.json 兼容投影服务。"""
 
     def __init__(self, database_path: Optional[Path] = None,
-                 portfolio_path: Optional[Path] = None):
-        self.database = TradingDatabase(database_path)
+                 portfolio_path: Optional[Path] = None,
+                 repository: Optional[TradingRepository] = None):
+        if repository is not None and database_path is not None:
+            raise ValueError("repository 与 database_path 不能同时指定")
+        self.repository = repository or SQLiteTradingRepository(database_path)
         self.portfolio_path = Path(portfolio_path) if portfolio_path is not None else DATA_DIR / "portfolio.json"
 
     def initialize_from_portfolio(self) -> dict:
         """将当前账户作为初始快照导入，不伪造历史成交。"""
         pm = PortfolioManager(self.portfolio_path)
-        connection = self.database.connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            if self._is_initialized(connection):
+        with self.repository.transaction():
+            if self.repository.is_initialized():
                 raise ValueError("成交台账已经初始化，不能重复导入初始快照")
             created_at = _now_iso()
-            connection.execute(
-                "INSERT INTO opening_account(id, cash, cash_flows_json, created_at) VALUES (1, ?, ?, ?)",
-                (pm.cash, json.dumps(pm.cash_flows, ensure_ascii=False), created_at),
-            )
+            account = {"cash": pm.cash, "cash_flows": pm.cash_flows, "created_at": created_at}
+            positions = []
             for position in pm.positions:
-                connection.execute(
-                    """
-                    INSERT INTO opening_positions(
-                        code, name, market, quantity, cost_price, current_price,
-                        sector, last_updated, pe, pb, roe, market_cap
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        position.code, position.name, position.market.value, position.shares,
-                        position.cost_price, position.current_price, position.sector,
-                        position.last_updated.isoformat() if position.last_updated else None,
-                        position.pe, position.pb, position.roe, position.market_cap,
+                positions.append({
+                    "code": position.code, "name": position.name,
+                    "market": position.market.value, "shares": position.shares,
+                    "asset_type": position.asset_type or (
+                        "ETF" if position.market.value == "ETF" else "STOCK"
                     ),
-                )
-            connection.execute("COMMIT")
-            return {"cash": pm.cash, "positions": len(pm.positions), "executions": 0}
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+                    "cost_price": position.cost_price, "current_price": position.current_price,
+                    "sector": position.sector,
+                    "last_updated": position.last_updated.isoformat() if position.last_updated else None,
+                    "pe": position.pe, "pb": position.pb, "roe": position.roe,
+                    "market_cap": position.market_cap,
+                })
+            self.repository.save_opening_snapshot(account, positions)
+        return {"cash": pm.cash, "positions": len(pm.positions), "executions": 0}
 
     @staticmethod
     def _apply_trade(state: dict, side: str, code: str, quantity: int,
-                     price: Decimal, fee: Decimal) -> Tuple[Optional[Decimal], Optional[dict]]:
+                     price: Decimal, fee: Decimal,
+                     asset_type: Optional[str] = None) -> Tuple[Optional[Decimal], Optional[dict]]:
         positions = state["positions"]
         cash = _decimal(state["cash"])
         amount = price * quantity
         current = positions.get(code)
+        resolved_type = asset_type or (
+            current.get("asset_type") if current else None
+        ) or ("ETF" if ETF_CODE_PATTERN.fullmatch(code) else "STOCK")
+        if current is not None:
+            current_type = current.get("asset_type") or (
+                "ETF" if current.get("market") == "ETF" else "STOCK"
+            )
+            if current_type != resolved_type:
+                raise ValueError(f"资产类型不一致：当前为 {current_type}，输入为 {resolved_type}")
 
         if side == "BUY":
             cash_needed = amount + fee
@@ -98,11 +94,14 @@ class TradingService:
             new_quantity = old_quantity + quantity
             average_cost = (old_cost * old_quantity + amount + fee) / new_quantity
             if current is None:
-                meta = ETF_POOL[code]
+                meta = ACCOUNT_THEME_MAP.get(code, ETF_POOL.get(code, {}))
                 current = {
                     "code": code,
-                    "name": meta["name"],
-                    "market": "ETF",
+                    "name": meta.get("name", f"{resolved_type} {code}"),
+                    "market": "ETF" if resolved_type == "ETF" else (
+                        "上海" if code.startswith(("6", "68")) else "深圳"
+                    ),
+                    "asset_type": resolved_type,
                     "shares": new_quantity,
                     "cost_price": float(average_cost),
                     "current_price": float(price),
@@ -134,25 +133,24 @@ class TradingService:
         return realized_pnl, current
 
     def is_initialized(self) -> bool:
-        connection = self.database.connect()
-        try:
-            return self._is_initialized(connection)
-        finally:
-            connection.close()
-
-    @staticmethod
-    def _is_initialized(connection: sqlite3.Connection) -> bool:
-        return connection.execute("SELECT 1 FROM opening_account WHERE id = 1").fetchone() is not None
+        return self.repository.is_initialized()
 
     @staticmethod
     def _validate_trade(side: str, code: str, quantity: int,
-                        price: float, fee: float) -> Tuple[str, str, int, Decimal, Decimal]:
+                        price: float, fee: float,
+                        asset_type: Optional[str] = None) -> Tuple[str, str, str, int, Decimal, Decimal]:
         normalized_side = str(side).upper()
         normalized_code = str(code).strip()
         if normalized_side not in ("BUY", "SELL"):
             raise ValueError("side 必须是 BUY 或 SELL")
-        if normalized_code not in ETF_POOL:
-            raise ValueError(f"ETF代码无效或不在项目ETF池中: {normalized_code}")
+        normalized_type = str(asset_type).upper() if asset_type else (
+            "ETF" if ETF_CODE_PATTERN.fullmatch(normalized_code) else "STOCK"
+        )
+        if normalized_type not in ("ETF", "STOCK"):
+            raise ValueError("asset_type 必须是 ETF 或 STOCK")
+        pattern = ETF_CODE_PATTERN if normalized_type == "ETF" else STOCK_CODE_PATTERN
+        if not pattern.fullmatch(normalized_code):
+            raise ValueError(f"{normalized_type}代码格式无效: {normalized_code}")
         if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
             raise ValueError("quantity 必须是正整数")
         price_value = _decimal(price)
@@ -161,10 +159,10 @@ class TradingService:
             raise ValueError("price 必须大于 0")
         if not fee_value.is_finite() or fee_value < 0:
             raise ValueError("fee 必须大于或等于 0")
-        return normalized_side, normalized_code, quantity, price_value, fee_value
+        return normalized_side, normalized_code, normalized_type, quantity, price_value, fee_value
 
     @staticmethod
-    def _assert_idempotent_match(row: sqlite3.Row, side: str, code: str,
+    def _assert_idempotent_match(row: dict, side: str, code: str,
                                  quantity: int, price: Decimal, fee: Decimal) -> None:
         matches = (
             row["side"] == side and row["code"] == code and
@@ -178,9 +176,10 @@ class TradingService:
                      fee: float = 0.0, external_id: Optional[str] = None,
                      source: str = "manual", related_plan_id: Optional[str] = None,
                      note: Optional[str] = None, executed_at: Optional[str] = None,
-                     execution_id: Optional[str] = None) -> TradeResult:
-        side, code, quantity, price_value, fee_value = self._validate_trade(
-            side, code, quantity, price, fee
+                     execution_id: Optional[str] = None,
+                     asset_type: Optional[str] = None) -> TradeResult:
+        side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
+            side, code, quantity, price, fee, asset_type
         )
         normalized_external_id = external_id.strip() if external_id and external_id.strip() else None
         normalized_source = source.strip() if source and source.strip() else "manual"
@@ -188,99 +187,75 @@ class TradingService:
         created_at = _now_iso()
         new_execution_id = execution_id or str(uuid.uuid4())
 
-        connection = self.database.connect()
         projection_snapshot = None
-        committed = False
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            if not self._is_initialized(connection):
-                raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
-
-            if normalized_external_id is not None:
-                existing = connection.execute(
-                    "SELECT * FROM executions WHERE external_id = ?", (normalized_external_id,)
-                ).fetchone()
-                if existing is not None:
-                    self._assert_idempotent_match(
-                        existing, side, code, quantity, price_value, fee_value
-                    )
-                    state = self._rebuild_state(connection)
-                    connection.execute("ROLLBACK")
-                    position = state["positions"].get(code)
-                    return TradeResult(
-                        execution=dict(existing), cash=float(state["cash"]),
-                        quantity=position["shares"] if position else 0,
-                        average_cost=position["cost_price"] if position else 0.0,
-                        duplicate=True,
+            with self.repository.transaction():
+                if not self.repository.is_initialized():
+                    raise ValueError(
+                        "成交台账尚未初始化；请先运行 portfolio-reconcile --initialize"
                     )
 
-            state = self._rebuild_state(connection)
-            realized_pnl, updated_position = self._apply_trade(
-                state, side, code, quantity, price_value, fee_value
-            )
-            connection.execute(
-                """
-                INSERT INTO executions(
-                    execution_id, external_id, side, code, quantity, price, fee,
-                    executed_at, source, related_plan_id, note, realized_pnl, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_execution_id, normalized_external_id, side, code, quantity,
-                    float(price_value), float(fee_value), execution_time, normalized_source,
-                    related_plan_id, note,
-                    float(realized_pnl) if realized_pnl is not None else None,
-                    created_at,
-                ),
-            )
+                if normalized_external_id is not None:
+                    existing = self.repository.get_execution_by_external_id(
+                        normalized_external_id
+                    )
+                    if existing is not None:
+                        self._assert_idempotent_match(
+                            existing, side, code, quantity, price_value, fee_value
+                        )
+                        state = self.repository.rebuild_account_state(
+                            self._rebuild_from_facts
+                        )
+                        position = state["positions"].get(code)
+                        return TradeResult(
+                            execution=existing, cash=float(state["cash"]),
+                            quantity=position["shares"] if position else 0,
+                            average_cost=position["cost_price"] if position else 0.0,
+                            duplicate=True,
+                        )
 
-            projection_snapshot = self._snapshot_projection_files()
-            self._write_projection(self._projection_from_state(state, traded_code=code))
-            connection.execute("COMMIT")
-            committed = True
-            execution = connection.execute(
-                "SELECT * FROM executions WHERE execution_id = ?", (new_execution_id,)
-            ).fetchone()
-            return TradeResult(
-                execution=dict(execution), cash=float(state["cash"]),
-                quantity=updated_position["shares"] if updated_position else 0,
-                average_cost=updated_position["cost_price"] if updated_position else 0.0,
-            )
+                state = self.repository.rebuild_account_state(self._rebuild_from_facts)
+                realized_pnl, updated_position = self._apply_trade(
+                    state, side, code, quantity, price_value, fee_value, asset_type
+                )
+                execution = {
+                    "execution_id": new_execution_id,
+                    "external_id": normalized_external_id,
+                    "side": side,
+                    "code": code,
+                    "asset_type": asset_type,
+                    "quantity": quantity,
+                    "price": float(price_value),
+                    "fee": float(fee_value),
+                    "executed_at": execution_time,
+                    "source": normalized_source,
+                    "related_plan_id": related_plan_id,
+                    "note": note,
+                    "realized_pnl": float(realized_pnl) if realized_pnl is not None else None,
+                    "created_at": created_at,
+                }
+                execution = self.repository.append_execution(execution)
+                projection_snapshot = self._snapshot_projection_files()
+                self._write_projection(self._projection_from_state(state, traded_code=code))
+                result = TradeResult(
+                    execution=execution, cash=float(state["cash"]),
+                    quantity=updated_position["shares"] if updated_position else 0,
+                    average_cost=updated_position["cost_price"] if updated_position else 0.0,
+                )
+            return result
         except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            if projection_snapshot is not None and not committed:
+            if projection_snapshot is not None:
                 self._restore_projection_files(projection_snapshot)
             raise
-        finally:
-            connection.close()
 
-    def _rebuild_state(self, connection: sqlite3.Connection) -> dict:
-        opening = connection.execute("SELECT * FROM opening_account WHERE id = 1").fetchone()
-        if opening is None:
-            raise ValueError("成交台账尚未初始化")
-        positions: Dict[str, dict] = {}
-        for row in connection.execute("SELECT * FROM opening_positions ORDER BY code"):
-            positions[row["code"]] = {
-                "code": row["code"],
-                "name": row["name"],
-                "market": row["market"],
-                "shares": row["quantity"],
-                "cost_price": row["cost_price"],
-                "current_price": row["current_price"],
-                "sector": row["sector"],
-                "last_updated": row["last_updated"],
-                "pe": row["pe"],
-                "pb": row["pb"],
-                "roe": row["roe"],
-                "market_cap": row["market_cap"],
-            }
+    def _rebuild_from_facts(self, opening: dict, positions: List[dict],
+                            cash_events: List[dict], executions: List[dict]) -> dict:
         state = {
             "cash": float(opening["cash"]),
-            "cash_flows": json.loads(opening["cash_flows_json"]),
-            "positions": positions,
+            "cash_flows": list(opening.get("cash_flows", [])),
+            "positions": {item["code"]: dict(item) for item in positions},
         }
-        for row in connection.execute("SELECT * FROM cash_events ORDER BY sequence"):
+        for row in cash_events:
             amount = _decimal(row["amount"])
             signed = amount if row["event_type"] == "DEPOSIT" else -amount
             state["cash"] = float(_decimal(state["cash"]) + signed)
@@ -289,33 +264,23 @@ class TradingService:
                 "amount": float(signed),
                 "note": row["note"] or row["event_type"],
             })
-        for row in connection.execute("SELECT * FROM executions ORDER BY sequence"):
+        for row in executions:
             self._apply_trade(
                 state, row["side"], row["code"], row["quantity"],
-                _decimal(row["price"]), _decimal(row["fee"]),
+                _decimal(row["price"]), _decimal(row["fee"]), row.get("asset_type"),
             )
         return state
 
     def rebuild_portfolio(self) -> dict:
-        connection = self.database.connect()
-        try:
-            return self._projection_from_state(self._rebuild_state(connection))
-        finally:
-            connection.close()
+        state = self.repository.rebuild_account_state(self._rebuild_from_facts)
+        return self._projection_from_state(state)
 
     def recent_executions(self, limit: int = 20) -> List[dict]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit 必须是正整数")
-        connection = self.database.connect()
-        try:
-            if not self._is_initialized(connection):
-                raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
-            rows = connection.execute(
-                "SELECT * FROM executions ORDER BY sequence DESC LIMIT ?", (limit,)
-            ).fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            connection.close()
+        if not self.repository.is_initialized():
+            raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
+        return self.repository.list_executions(limit=limit, newest_first=True)
 
     def reconcile(self, repair: bool = False) -> dict:
         expected = self.rebuild_portfolio()
@@ -396,7 +361,7 @@ class TradingService:
                     f"{code} 平均成本不一致: SQLite={left['cost_price']:.9f}, "
                     f"portfolio.json={float(right.get('cost_price', 0.0)):.9f}"
                 )
-            for field in ("name", "market", "sector"):
+            for field in ("name", "market", "asset_type", "sector"):
                 if left.get(field, "") != right.get(field, ""):
                     differences.append(f"{code} {field} 不一致")
         return differences

@@ -19,6 +19,7 @@ class StockPosition:
     shares: int
     cost_price: float
     current_price: float
+    asset_type: str = ""
     sector: str = ""
     last_updated: Optional[datetime.datetime] = None
     # 基本面因子（0 表示未录入）

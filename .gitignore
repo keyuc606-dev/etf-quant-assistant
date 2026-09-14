@@ -24,6 +24,7 @@ data/*.sqlite
 data/*.sqlite-*
 data/*.sqlite3
 data/*.sqlite3-*
+data/cloud-account-snapshot.b64
 data/state.json
 data/cache/*
 !data/cache/.gitkeep

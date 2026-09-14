@@ -1,6 +1,10 @@
 import os
 import time
 import datetime
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
@@ -121,19 +125,20 @@ class DataFetcher:
         self.max_retries = 2
         self._spot_cache: dict = {}  # 全市场实时快照表，按市场缓存，进程内复用
 
-    def _fetch_with_retry(self, fetch_fn, code: str):
+    def _fetch_with_retry(self, fetch_fn, code: str, retries: Optional[int] = None):
         """带重试的数据获取，每次自动绕过代理直连数据源"""
+        retry_count = self.max_retries if retries is None else max(0, retries)
         last_error = None
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(retry_count + 1):
             try:
                 with _no_proxy():
                     return fetch_fn()
             except Exception as e:
                 last_error = e
-                if attempt < self.max_retries:
+                if attempt < retry_count:
                     wait = (attempt + 1) * 3
                     time.sleep(wait)
-        print(f"  获取 {code} 数据失败 (已重试{self.max_retries}次): {last_error}")
+        print(f"  获取 {code} 数据失败 (已重试{retry_count}次): {last_error}")
         return None
 
     # ---------- 历史行情缓存 ----------
@@ -264,7 +269,63 @@ class DataFetcher:
                     adjust="qfq"
                 )
 
-        df = self._fetch_with_retry(_do_fetch, code)
+        # A股和ETF都有免费新浪备用源；主源失败时立即切换，避免24标的账户被逐项重试拖慢。
+        primary_retries = 0 if market in (Market.A_SH, Market.A_SZ, Market.ETF) else None
+        df = self._fetch_with_retry(_do_fetch, code, retries=primary_retries)
+
+        # 东财接口偶发主动断开连接。ETF 使用 AkShare 自带的新浪公开历史行情
+        # 作为免费降级源；联网仍严格封装在本模块内，不改变缓存与陈旧数据门禁。
+        if (df is None or df.empty) and market == Market.ETF:
+            exchange = "sh" if code.startswith(("5", "6")) else "sz"
+
+            def _do_fetch_sina():
+                return ak.fund_etf_hist_sina(symbol=f"{exchange}{code}")
+
+            sina = self._fetch_with_retry(_do_fetch_sina, f"{code}(新浪备用源)")
+            if sina is not None and not sina.empty:
+                rename = {
+                    "date": "日期", "open": "开盘", "close": "收盘",
+                    "high": "最高", "low": "最低", "volume": "成交量",
+                    "amount": "成交额",
+                }
+                df = sina.rename(columns=rename)
+                if "日期" in df.columns and "收盘" in df.columns:
+                    df["日期"] = pd.to_datetime(df["日期"])
+                    df = df[(df["日期"] >= pd.Timestamp(fetch_start))
+                            & (df["日期"] <= pd.Timestamp(today))].copy()
+                    if "涨跌幅" not in df.columns:
+                        df["涨跌幅"] = pd.to_numeric(
+                            df["收盘"], errors="coerce"
+                        ).pct_change() * 100
+                    print(f"  {code}: 已切换到新浪 ETF 公开历史行情备用源")
+
+        # A股同样提供新浪免费历史行情降级，避免东财单点故障导致股票账户全量不可用。
+        if (df is None or df.empty) and market in (Market.A_SH, Market.A_SZ):
+            exchange = "sh" if market == Market.A_SH else "sz"
+
+            def _do_fetch_stock_sina():
+                return ak.stock_zh_a_daily(
+                    symbol=f"{exchange}{code}", start_date=start_date,
+                    end_date=end_date, adjust="qfq",
+                )
+
+            sina = self._fetch_with_retry(_do_fetch_stock_sina, f"{code}(新浪备用源)")
+            if sina is not None and not sina.empty:
+                rename = {
+                    "date": "日期", "open": "开盘", "close": "收盘",
+                    "high": "最高", "low": "最低", "volume": "成交量",
+                    "amount": "成交额", "turnover": "换手率",
+                }
+                df = sina.rename(columns=rename)
+                if "日期" in df.columns and "收盘" in df.columns:
+                    df["日期"] = pd.to_datetime(df["日期"])
+                    df = df[(df["日期"] >= pd.Timestamp(fetch_start))
+                            & (df["日期"] <= pd.Timestamp(today))].copy()
+                    if "涨跌幅" not in df.columns:
+                        df["涨跌幅"] = pd.to_numeric(
+                            df["收盘"], errors="coerce"
+                        ).pct_change() * 100
+                    print(f"  {code}: 已切换到新浪 A股公开历史行情备用源")
 
         if df is None or df.empty:
             if cached is not None:
@@ -416,3 +477,92 @@ class DataFetcher:
 
     def fetch_realtime_hk(self, code: str) -> Optional[dict]:
         return self._lookup_spot("HK", code)
+
+    # ---------- 公开新闻元数据 ----------
+
+    def fetch_public_news_rss(self, query: str) -> Optional[bytes]:
+        """读取 Bing News RSS；正文不下载，解析与缓存由 data.news 负责。"""
+        encoded = urllib.parse.urlencode({
+            "q": query,
+            "format": "rss",
+            "setlang": "zh-hans",
+            "mkt": "zh-CN",
+            "qft": 'sortbydate="1"',
+        })
+        url = f"https://www.bing.com/news/search?{encoded}"
+
+        def _do_fetch():
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 ETFQuantAssistant/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return response.read()
+
+        return self._fetch_with_retry(_do_fetch, f"新闻:{query}")
+
+    def fetch_stock_news_metadata(self, code: str) -> Optional[list]:
+        """读取东财个股新闻，只返回标题、时间、来源和链接，不返回或缓存正文。"""
+        frame = self._fetch_with_retry(
+            lambda: ak.stock_news_em(symbol=code), f"{code}公司新闻"
+        )
+        if frame is None:
+            return None
+        if frame.empty:
+            return []
+        items = []
+        for _, row in frame.head(50).iterrows():
+            title = str(row.get("新闻标题", "") or "").strip()
+            url = str(row.get("新闻链接", "") or "").strip()
+            source = str(row.get("文章来源", "东方财富") or "东方财富").strip()
+            published = pd.to_datetime(row.get("发布时间"), errors="coerce")
+            if not title or not url or pd.isna(published):
+                continue
+            moment = published.to_pydatetime()
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=CN_TZ)
+            items.append({
+                "title": title,
+                "published_at": moment.astimezone(datetime.timezone.utc).isoformat(),
+                "source": source,
+                "url": url,
+            })
+        return items
+
+    # ---------- Telegram 通知 ----------
+
+    def send_telegram_message(self, bot_token: str, chat_id: str, text: str) -> dict:
+        """调用 Telegram Bot API；敏感凭据不会进入日志或异常文本。"""
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = json.dumps({
+            "chat_id": str(chat_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "ETFQuantAssistant/1.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            description = ""
+            try:
+                body = json.loads(error.read().decode("utf-8"))
+                description = str(body.get("description", ""))
+            except Exception:
+                pass
+            detail = f": {description}" if description else ""
+            raise RuntimeError(f"Telegram API 返回 HTTP {error.code}{detail}") from None
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Telegram 网络连接失败: {error.reason}") from None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("Telegram API 返回了无法解析的响应") from None
+
+        if not result.get("ok"):
+            raise RuntimeError(f"Telegram API 拒绝请求: {result.get('description', '未知错误')}")
+        message = result.get("result", {})
+        return {"message_id": message.get("message_id"), "ok": True}

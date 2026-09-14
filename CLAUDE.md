@@ -31,6 +31,12 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 .venv\Scripts\python.exe -m quant_assistant record-trade BUY 510300 1000 4.125 --fee 5
 .venv\Scripts\python.exe -m quant_assistant trade-history --limit 20
 .venv\Scripts\python.exe -m quant_assistant portfolio-reconcile
+
+# 8. 生成30秒账户日报并单向推送到 Telegram（凭据只从环境变量读取）
+.venv\Scripts\python.exe -m quant_assistant notify-daily
+
+# 9. 导出 GitHub Actions 使用的最后确认账户快照（本地敏感文件，禁止提交）
+.venv\Scripts\python.exe -m quant_assistant.cloud_snapshot export
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -41,6 +47,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 |---|---|
 | `quant_assistant/data/fetcher.py` | 唯一联网入口（akshare），缓存与离线降级 |
 | `quant_assistant/portfolio/` | 持仓、风控规则、告警、操作建议（完全离线） |
+| `quant_assistant/trading/` | 成交业务、Repository 接口与本地 SQLite 实现（完全离线） |
 | `quant_assistant/backtest/` | 回测引擎、指标计算、HTML 报告 |
 | `quant_assistant/screening/` | 观察池、过滤器、评分 |
 | `quant_assistant/config.py` | 所有手工维护的配置（见下） |

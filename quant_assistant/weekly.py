@@ -615,6 +615,7 @@ def render_weekly_markdown(as_of_date: datetime.date,
             lines.append(f"> - {warning}")
         lines.append("")
 
+    lines.extend(_account_portfolio_section(pm))
     lines.extend(_portfolio_section(pm, allocation))
     lines.extend(_drawdown_section(allocation))
     lines.extend(_signals_section(allocation))
@@ -624,7 +625,9 @@ def render_weekly_markdown(as_of_date: datetime.date,
     lines.extend([
         "## 附注",
         "",
-        "- 本报告交易清单完全由规则生成；新闻、情绪、财报解读不得改动清单。",
+        "- 本报告交易清单完全由原项目策略规则生成，不等同于针对真实账户的个性化投资建议。",
+        "- 账户中不属于策略 ETF 池的持仓可能被原规则归入“存量迁移”；执行前必须由账户所有人另行确认。",
+        "- 新闻、情绪、财报解读不得改动规则清单。",
         "",
     ])
     return "\n".join(lines)
@@ -635,9 +638,30 @@ def print_weekly_summary(result: dict) -> None:
     print(f"周报已写入: {result['report_path']}")
 
 
+def _account_portfolio_section(pm: PortfolioManager) -> List[str]:
+    lines = [
+        "## 我的真实账户持仓",
+        "",
+        "> 本节只展示账户事实，不代表这些 ETF 已进入原策略池。",
+        "",
+        "| 代码 | 名称 | 数量 | 当前权重 | 是否属于策略池 |",
+        "|---|---|---:|---:|---|",
+    ]
+    for pos in sorted(pm.positions, key=lambda item: item.code):
+        lines.append(
+            f"| {pos.code} | {pos.name} | {int(pos.shares):,} | "
+            f"{pm.get_position_weight(pos.code):.2%} | "
+            f"{'是' if pos.code in ETF_POOL else '否'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _portfolio_section(pm: PortfolioManager, allocation: dict) -> List[str]:
     lines = [
-        "## 组合状态",
+        "## 原策略 ETF 配置结果",
+        "",
+        "> 本节只按项目既有 ETF_POOL 和规则计算；不是对全部真实持仓的自动推荐。",
         "",
         f"- 总资产: ￥{pm.total_assets:,.0f}",
         f"- 现金: ￥{pm.cash:,.0f}",
@@ -704,8 +728,9 @@ def _signals_section(allocation: dict) -> List[str]:
 
 def _trades_section(plan: dict, migration: dict) -> List[str]:
     lines = [
-        "## 本周交易清单",
+        "## 原策略规则生成的本周交易清单",
         "",
+        "> 该清单用于观察原策略如何处理当前账户，不应未经人工核对直接执行。",
         f"- {plan.get('execution_note', '执行顺序：先卖出后买入')}",
         f"- 迁移进度: 已完成 {migration['completed_weeks']} 周；"
         f"当前目标池外剩余约 ￥{migration['remaining_value']:,.0f}，"

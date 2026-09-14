@@ -10,6 +10,7 @@
   python -m quant_assistant record-trade          # 本地录入 ETF 成交
   python -m quant_assistant trade-history         # 查看本地成交台账
   python -m quant_assistant portfolio-reconcile   # 核对 SQLite 与持仓投影
+  python -m quant_assistant notify-daily          # 生成30秒日报并单向推送到Telegram
 """
 import sys
 import argparse
@@ -48,17 +49,26 @@ def _guess_market(code: str) -> Market:
 
 
 def cmd_daily(args):
+    from .data.news import NewsDataService
+    from .news.analysis import build_theme_observations
+    from .portfolio.account_report import generate_account_reports
     from .portfolio.holdings import PortfolioManager
     from .portfolio.suggestions import generate_suggestions
     from .pipeline import run_daily_pipeline
     from .dashboard import generate_dashboard
+    from .trading.service import TradingService
     from .weekly import (HEARTBEAT_NO_RECORD_NOTICE, generate_emergency_rebalance,
                          print_emergency_summary, update_daily_heartbeat_check)
 
+    trading = TradingService()
+    if trading.is_initialized():
+        reconciliation = trading.reconcile(repair=True)
+        if reconciliation["repaired"]:
+            print("已按成交台账恢复持仓数量、成本和现金投影")
     pm = PortfolioManager()
     if not pm.positions:
         print("持仓为空（data/portfolio.json），可参考 data/portfolio.example.json 录入")
-        return
+        return None
 
     heartbeat_warning = update_daily_heartbeat_check()
     if heartbeat_warning:
@@ -90,7 +100,8 @@ def cmd_daily(args):
         print("\n  风控检查通过，无告警")
 
     if result["fetch_errors"]:
-        print(f"\n  [警告] 以下标的行情获取失败（用旧价格计算）: {', '.join(result['fetch_errors'])}")
+        print(f"\n  [警告] 以下标的行情获取失败；仅在已有有效旧价格时沿用，"
+              f"否则不计算盈亏: {', '.join(result['fetch_errors'])}")
 
     dashboard_alerts = []
     if emergency.get("triggered"):
@@ -100,6 +111,47 @@ def cmd_daily(args):
     path = generate_dashboard(pm, stock_data=result["stock_data"],
                               top_alerts=dashboard_alerts)
     print(f"\n  HTML 仪表盘: {path}")
+    try:
+        news_result = NewsDataService().fetch_for_instruments(
+            [position.code for position in pm.positions]
+        )
+    except Exception as error:
+        news_result = {
+            "items": [], "fetched_at": None, "news_as_of": None,
+            "is_stale": True, "degraded": True,
+            "source_status": {"bing_news_rss": "failed_no_cache"},
+            "errors": [str(error)],
+        }
+    news_as_of = datetime.datetime.now(datetime.timezone.utc)
+    theme_observations = build_theme_observations(
+        [position.code for position in pm.positions], news_result["items"], news_as_of
+    )
+    reports = generate_account_reports(
+        pm,
+        stock_data=result["stock_data"],
+        alerts=result["alerts"],
+        fetch_errors=result["fetch_errors"],
+        news_result=news_result,
+        theme_observations=theme_observations,
+    )
+    print(f"  账户日报: {reports['daily']}")
+    print(f"  详细报告: {reports['detail']}")
+    return reports
+
+
+def cmd_notify_daily(args):
+    from .notifications.telegram import TelegramNotifier
+
+    reports = cmd_daily(args)
+    if not reports:
+        raise RuntimeError("日报未生成，Telegram 未发送")
+
+    result = TelegramNotifier().send_daily_report(reports["daily"])
+    if not result.success:
+        raise RuntimeError(
+            f"日报已正常生成，但 Telegram 推送失败: {result.error}"
+        )
+    print(f"  Telegram 推送成功: {result.sent_parts} 条消息")
 
 
 def cmd_backtest(args):
@@ -279,12 +331,14 @@ def cmd_record_trade(args):
         related_plan_id=args.related_plan_id,
         note=args.note,
         executed_at=args.executed_at,
+        asset_type=args.asset_type,
     )
     execution = result.execution
     status = "重复 external_id，未重复记账" if result.duplicate else "成交已记账"
     print(f"{status}: {execution['execution_id']}")
+    unit = "股" if execution.get("asset_type") == "STOCK" else "份"
     print(
-        f"{execution['side']} {execution['code']} {execution['quantity']} 份 @ "
+        f"{execution['side']} {execution['code']} {execution['quantity']} {unit} @ "
         f"￥{execution['price']:.4f}，费用 ￥{execution['fee']:.2f}"
     )
     print(f"成交后现金: ￥{result.cash:,.2f}")
@@ -306,14 +360,14 @@ def cmd_trade_history(args):
     for item in executions:
         pnl = item["realized_pnl"]
         rows.append([
-            item["executed_at"], item["side"], item["code"], item["quantity"],
+            item["executed_at"], item["side"], item["code"], item.get("asset_type", "ETF"), item["quantity"],
             f"{item['price']:.4f}", f"{item['fee']:.2f}",
             "-" if pnl is None else f"{pnl:+.2f}", item["source"],
             item["external_id"] or "-",
         ])
     print(tabulate(
         rows,
-        headers=["成交时间", "方向", "代码", "数量", "价格", "费用", "已实现盈亏", "来源", "external_id"],
+        headers=["成交时间", "方向", "代码", "类型", "数量", "价格", "费用", "已实现盈亏", "来源", "external_id"],
         tablefmt="grid",
     ))
 
@@ -350,6 +404,10 @@ def main():
     p_daily.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
     p_daily.set_defaults(func=cmd_daily)
 
+    p_notify = sub.add_parser("notify-daily", help="生成30秒账户日报并单向推送到Telegram")
+    p_notify.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
+    p_notify.set_defaults(func=cmd_notify_daily)
+
     p_bt = sub.add_parser("backtest", help="单标的策略回测")
     p_bt.add_argument("code", help="股票代码，如 600519（A股6位）/ 00700（港股5位）")
     p_bt.add_argument("--strategy", choices=STRATEGY_CHOICES, default="dual_ma",
@@ -383,10 +441,12 @@ def main():
 
     p_trade = sub.add_parser("record-trade", help="将人工确认的 ETF 成交写入本地台账")
     p_trade.add_argument("side", choices=["BUY", "SELL"], help="成交方向")
-    p_trade.add_argument("code", help="项目 ETF 池中的六位代码")
+    p_trade.add_argument("code", help="六位A股股票或场内ETF代码")
     p_trade.add_argument("quantity", type=int, help="成交份额（正整数）")
     p_trade.add_argument("price", type=float, help="成交单价（大于0）")
     p_trade.add_argument("--fee", type=float, default=0.0, help="成交费用（默认0）")
+    p_trade.add_argument("--asset-type", choices=["ETF", "STOCK"],
+                         help="资产类型；省略时按证券代码格式判断")
     p_trade.add_argument("--external-id", help="外部成交编号；重复提交保持幂等")
     p_trade.add_argument("--source", default="manual", help="记录来源（默认manual）")
     p_trade.add_argument("--related-plan-id", help="关联的计划编号")
