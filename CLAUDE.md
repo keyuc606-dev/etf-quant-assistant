@@ -40,6 +40,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 
 # 10. Telegram 双向交易反馈由 account-trade-telegram.yml 每五分钟轮询
 #     文本格式与私有状态仓库部署见 docs/TELEGRAM-trade-feedback.md
+#     支持一条消息多行成交，整批确认/取消并原子提交。
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -58,6 +59,8 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `data/portfolio.json` | daily/weekly/dashboard 使用的兼容持仓投影 |
 | 私有状态仓库 `state/account-state.json` | 云端最新确认账户、Telegram 游标和待确认项；不在本代码仓库 |
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
+
+09:20 日报是“前一交易日收盘 + 隔夜新闻的当天作战计划”，不是实时盘中建议。规则层产生全部价格与仓位数字；可选 OpenAI provider 仅压缩文字和排序。GitHub Secret `OPENAI_API_KEY` 未配置或调用失败时自动降级为纯规则版。
 
 ## 数据文件与缓存机制
 

@@ -4,6 +4,7 @@ import datetime
 import base64
 import binascii
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -453,7 +454,11 @@ class DataFetcher:
     def _spot_table(self, market_key: str) -> Optional[pd.DataFrame]:
         """全市场实时快照表（约 5000 行），进程内只拉一次，按 code 多次查询"""
         if market_key not in self._spot_cache:
-            fetch_fn = ak.stock_zh_a_spot_em if market_key == "A" else ak.stock_hk_spot_em
+            fetch_fn = {
+                "A": ak.stock_zh_a_spot_em,
+                "ETF": ak.fund_etf_spot_em,
+                "HK": ak.stock_hk_spot_em,
+            }[market_key]
             self._spot_cache[market_key] = self._fetch_with_retry(fetch_fn, f"{market_key}股实时快照")
         return self._spot_cache[market_key]
 
@@ -479,6 +484,69 @@ class DataFetcher:
 
     def fetch_realtime_hk(self, code: str) -> Optional[dict]:
         return self._lookup_spot("HK", code)
+
+    def identify_security(self, code: str) -> Optional[dict]:
+        """从现有免费行情源识别六位沪深股票或场内 ETF。"""
+        code = str(code).strip()
+        if not re.fullmatch(r"\d{6}", code):
+            return None
+        for market_key, asset_type in (("ETF", "ETF"), ("A", "STOCK")):
+            item = self._lookup_spot(market_key, code)
+            if item is None:
+                continue
+            name = str(item.get("name") or "").strip()
+            if (not name or item.get("price", 0.0) <= 0 or "退" in name
+                    or "ST" in name.upper()):
+                return None
+            exchange = "上海" if code.startswith(("5", "6", "68")) else "深圳"
+            return {
+                "code": code, "name": name, "asset_type": asset_type,
+                "market": "ETF" if asset_type == "ETF" else exchange,
+                "exchange": exchange, "reference_price": float(item["price"]),
+            }
+        return None
+
+    def request_openai_json(self, api_key: str, model: str, payload: dict) -> dict:
+        """调用 OpenAI Responses API；调用方只传去标识化的规则候选与技术摘要。"""
+        body = json.dumps({
+            "model": model,
+            "instructions": "你是投资报告文字编辑。只能解释输入中的既有结论，不得新增、修改或猜测任何数字；notes 中不得出现数字字符。",
+            "input": json.dumps(payload, ensure_ascii=False),
+            "store": False,
+            "max_output_tokens": 1200,
+            "text": {"format": {
+                "type": "json_schema", "name": "account_advice_editorial",
+                "strict": True,
+                "schema": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "order": {"type": "array", "items": {"type": "string"}},
+                        "notes": {"type": "array", "items": {
+                            "type": "object", "additionalProperties": False,
+                            "properties": {"code": {"type": "string"}, "note": {"type": "string"}},
+                            "required": ["code", "note"],
+                        }},
+                    },
+                    "required": ["order", "notes"],
+                },
+            }},
+        }, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses", data=body, method="POST",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        output_text = result.get("output_text")
+        if not isinstance(output_text, str):
+            for item in result.get("output", []):
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        output_text = content.get("text")
+                        break
+        if not isinstance(output_text, str):
+            raise ValueError("OpenAI 返回缺少 JSON 文本")
+        return json.loads(output_text)
 
     # ---------- 公开新闻元数据 ----------
 

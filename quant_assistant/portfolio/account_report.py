@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 from ..analysis.indicators import get_signals
+from ..analysis.account_advice import build_rule_advices
 from ..config import ETF_POOL, REPORT_DIR
 
 
@@ -87,7 +88,8 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
                              news_result: Optional[dict] = None,
                              theme_observations: Optional[Dict[str, dict]] = None,
                              report_dir: Optional[Path] = None,
-                             generated_at: Optional[datetime.datetime] = None) -> dict:
+                             generated_at: Optional[datetime.datetime] = None,
+                             advice_provider=None) -> dict:
     report_dir = Path(report_dir) if report_dir is not None else REPORT_DIR
     report_dir.mkdir(parents=True, exist_ok=True)
     stock_data = stock_data or {}
@@ -95,10 +97,19 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     news_result = news_result or _empty_news_result()
     theme_observations = theme_observations or {}
     views = _position_views(pm, stock_data, theme_observations)
+    advices = build_rule_advices(views, stock_data)
+    advice_mode = "纯规则"
+    if advice_provider is not None:
+        advices, advice_mode = advice_provider.enhance(advices)
+    advice_by_code = {item["code"]: item for item in advices}
     focus = select_focus_positions(views)
-    daily = _render_daily(pm, views, focus, news_result, generated_at)
+    advice_order = {item["code"]: index for index, item in enumerate(advices)}
+    focus.sort(key=lambda item: advice_order.get(item["position"].code, len(advices)))
+    daily = _render_daily(pm, views, focus, news_result, generated_at,
+                          advice_by_code, advice_mode)
     detail = _render_detail(
-        pm, views, alerts or [], fetch_errors or [], news_result, generated_at
+        pm, views, alerts or [], fetch_errors or [], news_result, generated_at,
+        advice_by_code, advice_mode,
     )
     daily_path = report_dir / "my-portfolio-daily.md"
     detail_path = report_dir / "my-portfolio-detail.md"
@@ -121,7 +132,8 @@ def _risk_level(views: List[dict]) -> str:
 
 
 def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
-                  generated_at: datetime.datetime) -> str:
+                  generated_at: datetime.datetime, advice_by_code: dict,
+                  advice_mode: str) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0.0
@@ -146,6 +158,8 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         f"日期：{generated_at.date().isoformat()}",
         f"行情截止：{_market_as_of(views)}",
         f"新闻截止：{_news_as_of(news_result)}",
+        "计划口径：前一交易日收盘 + 隔夜新闻的当天作战计划（非实时盘中建议）",
+        f"分析模式：{advice_mode}",
         *([f"新闻状态：{_source_status_text(news_result)}"] if news_result.get("degraded") else []),
         "",
         "## 一、账户概览",
@@ -166,6 +180,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         lines.extend(["今日没有触发明显异常。", ""])
     for item in focus:
         pos = item["position"]
+        advice = advice_by_code[pos.code]
         lines.extend([
             f"### {pos.name}（{pos.code}）",
             "",
@@ -176,6 +191,10 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
             f"- 状态：{_state_summary(item)}",
             f"- 近期事件：{_recent_event_text(item['theme_observation'])}",
             f"- 主题状态：{item['theme_observation'].get('status', '近期公开信息不足，暂不形成行业判断。')}",
+            f"- 操作倾向：{advice['action_label']}；建议仓位变化：{advice['position_change']}；置信度：{advice['confidence']}",
+            f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
+            f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
+            f"- 核心理由：{advice['ai_note'] or '；'.join(advice['reasons'][:2])}",
         ])
         if item["pnl_pct"] is not None and item["pnl_pct"] <= -0.15:
             lines.append("- 提示：历史亏损较大，但不能仅因亏损决定卖出或补仓。")
@@ -223,7 +242,9 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         f"- 当前{'无' if max_weight <= 0.20 else '有'}单一股票或 ETF 仓位超过 20%。",
         f"- 短期偏弱、超卖或波动较大的重点项：{'、'.join(weak_names) if weak_names else '无'}。",
         f"- 出现短期技术改善信号的重点项：{'、'.join(improving) if improving else '无'}；不能单凭技术交叉判断反转。",
-        "- 新闻与主题信息只用于补充背景；当前尚未接入 AI 综合判断，因此不生成主动买卖建议。",
+        "- 所有价格区间、失效位、目标位和仓位变化均由确定性规则计算；AI（如启用）只压缩文字与排序。",
+        *(["- 当前尚未接入 AI 综合判断，以上为纯规则建议。"]
+          if advice_mode == "纯规则" else []),
         "- 若实际成交未录入，系统只能按最后一次确认的已记录持仓分析；不会假定成交已经发生。",
         "",
         "## 原量化策略基准",
@@ -243,7 +264,8 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
 
 
 def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
-                   news_result: dict, generated_at: datetime.datetime) -> str:
+                   news_result: dict, generated_at: datetime.datetime,
+                   advice_by_code: dict, advice_mode: str) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     cash_ratio = pm.cash / pm.total_assets if pm.total_assets > 0 else 0.0
@@ -253,6 +275,8 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         f"生成日期：{generated_at.isoformat(timespec='minutes')}",
         f"行情截止：{_market_as_of(views)}",
         f"新闻截止：{_news_as_of(news_result)}",
+        "计划口径：前一交易日收盘 + 隔夜新闻的当天作战计划（非实时盘中建议）",
+        f"分析模式：{advice_mode}",
         "",
         "## 账户完整数据",
         "",
@@ -276,6 +300,19 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
             f"| {pos.code} | {pos.name} | {_asset_type(pos)} | {int(pos.shares):,} | {pos.cost_price:.4f} | "
             f"{current} | ￥{pos.market_value:,.2f} | {pnl} | {item['weight']:.2%} | "
             f"{item['data_date'] or '-'} |"
+        )
+    lines.extend([
+        "", "## 全部持仓规则建议", "",
+        "| 代码 | 倾向 | 买入区间 | 减仓区间 | 止损/失效位 | 目标位 | 仓位变化 | 置信度 | 核心理由 |",
+        "|---|---|---:|---:|---:|---:|---|---|---|",
+    ])
+    for item in views:
+        advice = advice_by_code[item["position"].code]
+        lines.append(
+            f"| {advice['code']} | {advice['action_label']} | {_price_range(advice['buy_range'])} | "
+            f"{_price_range(advice['reduce_range'])} | {_price(advice['stop'])} | {_price(advice['target'])} | "
+            f"{advice['position_change']} | {advice['confidence']} | "
+            f"{advice['ai_note'] or '；'.join(advice['reasons'])} |"
         )
     lines.extend([
         "",
@@ -436,6 +473,14 @@ def _date_text(value) -> Optional[str]:
 
 def _number(value, digits: int = 3) -> str:
     return "-" if value is None else f"{value:.{digits}f}"
+
+
+def _price(value) -> str:
+    return "不可用" if value is None else f"￥{float(value):.4f}"
+
+
+def _price_range(value) -> str:
+    return "不可用" if value is None else f"￥{value[0]:.4f}–{value[1]:.4f}"
 
 
 def _percent(value) -> str:

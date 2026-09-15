@@ -52,6 +52,7 @@ def cmd_daily(args):
     from .data.news import NewsDataService
     from .news.analysis import build_theme_observations
     from .portfolio.account_report import generate_account_reports
+    from .analysis.account_advice import OpenAIAdviceProvider
     from .portfolio.holdings import PortfolioManager
     from .portfolio.suggestions import generate_suggestions
     from .pipeline import run_daily_pipeline
@@ -133,6 +134,7 @@ def cmd_daily(args):
         fetch_errors=result["fetch_errors"],
         news_result=news_result,
         theme_observations=theme_observations,
+        advice_provider=OpenAIAdviceProvider(result["fetcher"]),
     )
     print(f"  账户日报: {reports['daily']}")
     print(f"  详细报告: {reports['detail']}")
@@ -318,9 +320,16 @@ def cmd_weekly(args):
 
 
 def cmd_record_trade(args):
+    from .data.fetcher import DataFetcher
     from .trading.service import TradingService
 
-    result = TradingService().record_trade(
+    service = TradingService()
+    instrument = None
+    if args.side == "BUY" and not service.has_position(args.code):
+        instrument = DataFetcher().identify_security(args.code)
+        if instrument is None:
+            raise ValueError(f"{args.code} 无法从行情源识别或当前状态异常")
+    result = service.record_trade(
         side=args.side,
         code=args.code,
         quantity=args.quantity,
@@ -331,7 +340,8 @@ def cmd_record_trade(args):
         related_plan_id=args.related_plan_id,
         note=args.note,
         executed_at=args.executed_at,
-        asset_type=args.asset_type,
+        asset_type=args.asset_type or (instrument or {}).get("asset_type"),
+        instrument=instrument,
     )
     execution = result.execution
     status = "重复 external_id，未重复记账" if result.duplicate else "成交已记账"

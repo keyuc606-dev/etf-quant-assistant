@@ -69,7 +69,8 @@ class TradingService:
     @staticmethod
     def _apply_trade(state: dict, side: str, code: str, quantity: int,
                      price: Decimal, fee: Decimal,
-                     asset_type: Optional[str] = None) -> Tuple[Optional[Decimal], Optional[dict]]:
+                     asset_type: Optional[str] = None,
+                     instrument: Optional[dict] = None) -> Tuple[Optional[Decimal], Optional[dict]]:
         positions = state["positions"]
         cash = _decimal(state["cash"])
         amount = price * quantity
@@ -96,12 +97,12 @@ class TradingService:
             average_cost = (old_cost * old_quantity + amount + fee) / new_quantity
             if current is None:
                 meta = ACCOUNT_THEME_MAP.get(code, ETF_POOL.get(code, {}))
+                instrument = instrument or {}
                 current = {
                     "code": code,
-                    "name": meta.get("name", f"{resolved_type} {code}"),
-                    "market": "ETF" if resolved_type == "ETF" else (
-                        "上海" if code.startswith(("6", "68")) else "深圳"
-                    ),
+                    "name": instrument.get("name") or meta.get("name", f"{resolved_type} {code}"),
+                    "market": instrument.get("market") or ("ETF" if resolved_type == "ETF" else (
+                        "上海" if code.startswith(("6", "68")) else "深圳")),
                     "asset_type": resolved_type,
                     "shares": new_quantity,
                     "cost_price": float(average_cost),
@@ -178,7 +179,8 @@ class TradingService:
                      source: str = "manual", related_plan_id: Optional[str] = None,
                      note: Optional[str] = None, executed_at: Optional[str] = None,
                      execution_id: Optional[str] = None,
-                     asset_type: Optional[str] = None) -> TradeResult:
+                     asset_type: Optional[str] = None,
+                     instrument: Optional[dict] = None) -> TradeResult:
         side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
             side, code, quantity, price, fee, asset_type
         )
@@ -217,7 +219,8 @@ class TradingService:
 
                 state = self.repository.rebuild_account_state(self._rebuild_from_facts)
                 realized_pnl, updated_position = self._apply_trade(
-                    state, side, code, quantity, price_value, fee_value, asset_type
+                    state, side, code, quantity, price_value, fee_value, asset_type,
+                    instrument,
                 )
                 execution = {
                     "execution_id": new_execution_id,
@@ -231,7 +234,7 @@ class TradingService:
                     "executed_at": execution_time,
                     "source": normalized_source,
                     "related_plan_id": related_plan_id,
-                    "note": note,
+                    "note": self._instrument_note(note, instrument),
                     "realized_pnl": float(realized_pnl) if realized_pnl is not None else None,
                     "created_at": created_at,
                 }
@@ -250,7 +253,8 @@ class TradingService:
             raise
 
     def preview_trade(self, side: str, code: str, quantity: int, price: float,
-                      fee: float = 0.0, asset_type: Optional[str] = None) -> dict:
+                      fee: float = 0.0, asset_type: Optional[str] = None,
+                      instrument: Optional[dict] = None) -> dict:
         """校验一笔成交并返回成交后摘要，但不写 SQLite 或持仓投影。"""
         side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
             side, code, quantity, price, fee, asset_type
@@ -261,7 +265,8 @@ class TradingService:
             self.repository.rebuild_account_state(self._rebuild_from_facts)
         )
         realized_pnl, updated_position = self._apply_trade(
-            state, side, code, quantity, price_value, fee_value, asset_type
+            state, side, code, quantity, price_value, fee_value, asset_type,
+            instrument,
         )
         return {
             "side": side,
@@ -275,6 +280,91 @@ class TradingService:
             "average_cost": updated_position["cost_price"] if updated_position else 0.0,
             "realized_pnl": float(realized_pnl) if realized_pnl is not None else None,
         }
+
+    def has_position(self, code: str) -> bool:
+        if not self.repository.is_initialized():
+            return False
+        return str(code) in self.repository.rebuild_account_state(
+            self._rebuild_from_facts
+        )["positions"]
+
+    def preview_trades(self, trades: List[dict]) -> dict:
+        """按输入顺序预检整批成交；任一失败时不产生任何写入。"""
+        if not trades:
+            raise ValueError("交易批次不能为空")
+        if not self.repository.is_initialized():
+            raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
+        state = copy.deepcopy(self.repository.rebuild_account_state(self._rebuild_from_facts))
+        previews = []
+        for index, trade in enumerate(trades, 1):
+            try:
+                side, code, asset_type, quantity, price, fee = self._validate_trade(
+                    trade["side"], trade["code"], trade["quantity"], trade["price"],
+                    trade.get("fee", 0.0), trade.get("asset_type"),
+                )
+                pnl, position = self._apply_trade(
+                    state, side, code, quantity, price, fee, asset_type,
+                    trade.get("instrument"),
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"第{index}笔：{error}") from error
+            previews.append({
+                "side": side, "code": code, "asset_type": asset_type,
+                "quantity": quantity, "price": float(price), "fee": float(fee),
+                "cash": float(state["cash"]),
+                "position_quantity": position["shares"] if position else 0,
+                "realized_pnl": float(pnl) if pnl is not None else None,
+            })
+        return {"trades": previews, "cash": float(state["cash"])}
+
+    def record_trades(self, trades: List[dict], batch_external_id: str,
+                      source: str = "telegram-confirmed") -> dict:
+        """在一个 Repository 事务中提交整批成交，并且只写一次持仓投影。"""
+        preview = self.preview_trades(trades)
+        projection_snapshot = None
+        results = []
+        try:
+            with self.repository.transaction():
+                state = self.repository.rebuild_account_state(self._rebuild_from_facts)
+                for index, trade in enumerate(trades, 1):
+                    side, code, asset_type, quantity, price, fee = self._validate_trade(
+                        trade["side"], trade["code"], trade["quantity"], trade["price"],
+                        trade.get("fee", 0.0), trade.get("asset_type"),
+                    )
+                    external_id = f"{batch_external_id}:{index}"
+                    existing = self.repository.get_execution_by_external_id(external_id)
+                    if existing is not None:
+                        self._assert_idempotent_match(existing, side, code, quantity, price, fee)
+                        results.append(existing)
+                        continue
+                    pnl, _position = self._apply_trade(
+                        state, side, code, quantity, price, fee, asset_type,
+                        trade.get("instrument"),
+                    )
+                    execution = self.repository.append_execution({
+                        "execution_id": str(uuid.uuid4()), "external_id": external_id,
+                        "side": side, "code": code, "asset_type": asset_type,
+                        "quantity": quantity, "price": float(price), "fee": float(fee),
+                        "executed_at": _now_iso(), "source": source,
+                        "related_plan_id": None,
+                        "note": self._instrument_note("Telegram 批量二次确认成交", trade.get("instrument")),
+                        "realized_pnl": float(pnl) if pnl is not None else None,
+                        "created_at": _now_iso(),
+                    })
+                    results.append(execution)
+                projection_snapshot = self._snapshot_projection_files()
+                traded_codes = {item["code"] for item in trades}
+                projection = self._projection_from_state(state)
+                now = datetime.datetime.now().isoformat()
+                for item in projection["positions"]:
+                    if item["code"] in traded_codes and not item.get("last_updated"):
+                        item["last_updated"] = now
+                self._write_projection(projection)
+            return {"executions": results, "cash": preview["cash"]}
+        except Exception:
+            if projection_snapshot is not None:
+                self._restore_projection_files(projection_snapshot)
+            raise
 
     def _rebuild_from_facts(self, opening: dict, positions: List[dict],
                             cash_events: List[dict], executions: List[dict]) -> dict:
@@ -293,11 +383,29 @@ class TradingService:
                 "note": row["note"] or row["event_type"],
             })
         for row in executions:
+            instrument = self._instrument_from_note(row.get("note"))
             self._apply_trade(
                 state, row["side"], row["code"], row["quantity"],
                 _decimal(row["price"]), _decimal(row["fee"]), row.get("asset_type"),
+                instrument,
             )
         return state
+
+    @staticmethod
+    def _instrument_note(note: Optional[str], instrument: Optional[dict]) -> Optional[str]:
+        if not instrument:
+            return note
+        safe = {key: instrument.get(key) for key in ("name", "market", "asset_type")}
+        return "instrument:" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")) + "\n" + (note or "")
+
+    @staticmethod
+    def _instrument_from_note(note: Optional[str]) -> Optional[dict]:
+        if not isinstance(note, str) or not note.startswith("instrument:"):
+            return None
+        try:
+            return json.loads(note.split("\n", 1)[0][len("instrument:"):])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return None
 
     def rebuild_portfolio(self) -> dict:
         state = self.repository.rebuild_account_state(self._rebuild_from_facts)

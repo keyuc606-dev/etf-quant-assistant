@@ -80,7 +80,9 @@ class TelegramTradeBot:
             state["account_snapshot_b64"], self.database_path, self.portfolio_path
         )
         service = TradingService(self.database_path, self.portfolio_path)
-        feedback = TelegramTradeFeedback(service).handle(
+        feedback = TelegramTradeFeedback(
+            service, getattr(self.fetcher, "identify_security", None)
+        ).handle(
             selected[1], selected[0], self.chat_id, telegram.get("pending")
         )
         if feedback.account_changed:

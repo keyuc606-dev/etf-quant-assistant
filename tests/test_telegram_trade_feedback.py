@@ -169,6 +169,29 @@ class CloudStateTest(unittest.TestCase):
 
 
 class TelegramBotEndToEndTest(unittest.TestCase):
+    def test_batch_survives_ephemeral_runner_then_commits_all(self):
+        with tempfile.TemporaryDirectory() as initial_temp:
+            service = make_service(Path(initial_temp))
+            initial_snapshot = encode_snapshot(build_snapshot(service))
+        store = MemoryStateStore()
+        with tempfile.TemporaryDirectory() as first_temp:
+            bot = TelegramTradeBot(
+                "token", "123", store,
+                FakeTelegramFetcher([update(300, "卖出 600104 100股 18.00\n买入 600104 50股 17.00")]),
+                Path(first_temp) / "ledger.sqlite3", Path(first_temp) / "portfolio.json",
+            )
+            self.assertEqual(bot.run_once(initial_snapshot)["status"], "message-processed")
+        self.assertEqual(len(store.state["telegram"]["pending"]["commands"]), 2)
+        with tempfile.TemporaryDirectory() as second_temp:
+            bot = TelegramTradeBot(
+                "token", "123", store, FakeTelegramFetcher([update(301, "确认")]),
+                Path(second_temp) / "ledger.sqlite3", Path(second_temp) / "portfolio.json",
+            )
+            self.assertEqual(bot.run_once()["status"], "account-updated")
+        snapshot = decode_snapshot(store.state["account_snapshot_b64"])
+        self.assertEqual(snapshot["positions"][0]["shares"], 450)
+        self.assertAlmostEqual(snapshot["account"]["cash"], 10_950.0)
+
     def test_simulated_trade_survives_two_ephemeral_runners(self):
         with tempfile.TemporaryDirectory() as initial_temp:
             service = make_service(Path(initial_temp))
