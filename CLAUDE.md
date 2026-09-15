@@ -37,6 +37,9 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 
 # 9. 导出 GitHub Actions 使用的最后确认账户快照（本地敏感文件，禁止提交）
 .venv\Scripts\python.exe -m quant_assistant.cloud_snapshot export
+
+# 10. Telegram 双向交易反馈由 account-trade-telegram.yml 每五分钟轮询
+#     文本格式与私有状态仓库部署见 docs/TELEGRAM-trade-feedback.md
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -53,6 +56,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `quant_assistant/config.py` | 所有手工维护的配置（见下） |
 | `data/trading.sqlite3` | 本地初始快照与成交事实源 |
 | `data/portfolio.json` | daily/weekly/dashboard 使用的兼容持仓投影 |
+| 私有状态仓库 `state/account-state.json` | 云端最新确认账户、Telegram 游标和待确认项；不在本代码仓库 |
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
 ## 数据文件与缓存机制

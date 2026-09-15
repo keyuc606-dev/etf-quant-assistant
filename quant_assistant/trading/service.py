@@ -1,4 +1,5 @@
 import datetime
+import copy
 import json
 import os
 import re
@@ -247,6 +248,33 @@ class TradingService:
             if projection_snapshot is not None:
                 self._restore_projection_files(projection_snapshot)
             raise
+
+    def preview_trade(self, side: str, code: str, quantity: int, price: float,
+                      fee: float = 0.0, asset_type: Optional[str] = None) -> dict:
+        """校验一笔成交并返回成交后摘要，但不写 SQLite 或持仓投影。"""
+        side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
+            side, code, quantity, price, fee, asset_type
+        )
+        if not self.repository.is_initialized():
+            raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
+        state = copy.deepcopy(
+            self.repository.rebuild_account_state(self._rebuild_from_facts)
+        )
+        realized_pnl, updated_position = self._apply_trade(
+            state, side, code, quantity, price_value, fee_value, asset_type
+        )
+        return {
+            "side": side,
+            "code": code,
+            "asset_type": asset_type,
+            "quantity": quantity,
+            "price": float(price_value),
+            "fee": float(fee_value),
+            "cash": float(state["cash"]),
+            "position_quantity": updated_position["shares"] if updated_position else 0,
+            "average_cost": updated_position["cost_price"] if updated_position else 0.0,
+            "realized_pnl": float(realized_pnl) if realized_pnl is not None else None,
+        }
 
     def _rebuild_from_facts(self, opening: dict, positions: List[dict],
                             cash_events: List[dict], executions: List[dict]) -> dict:

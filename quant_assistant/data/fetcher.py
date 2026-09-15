@@ -1,6 +1,8 @@
 import os
 import time
 import datetime
+import base64
+import binascii
 import json
 import urllib.error
 import urllib.parse
@@ -531,17 +533,13 @@ class DataFetcher:
 
     # ---------- Telegram 通知 ----------
 
-    def send_telegram_message(self, bot_token: str, chat_id: str, text: str) -> dict:
-        """调用 Telegram Bot API；敏感凭据不会进入日志或异常文本。"""
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({
-            "chat_id": str(chat_id),
-            "text": text,
-            "disable_web_page_preview": True,
-        }, ensure_ascii=False).encode("utf-8")
+    @staticmethod
+    def _telegram_request(bot_token: str, method: str, payload: dict) -> dict:
+        url = f"https://api.telegram.org/bot{bot_token}/{method}"
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             url,
-            data=payload,
+            data=body,
             headers={"Content-Type": "application/json", "User-Agent": "ETFQuantAssistant/1.0"},
             method="POST",
         )
@@ -551,8 +549,8 @@ class DataFetcher:
         except urllib.error.HTTPError as error:
             description = ""
             try:
-                body = json.loads(error.read().decode("utf-8"))
-                description = str(body.get("description", ""))
+                response_body = json.loads(error.read().decode("utf-8"))
+                description = str(response_body.get("description", ""))
             except Exception:
                 pass
             detail = f": {description}" if description else ""
@@ -561,8 +559,94 @@ class DataFetcher:
             raise RuntimeError(f"Telegram 网络连接失败: {error.reason}") from None
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise RuntimeError("Telegram API 返回了无法解析的响应") from None
-
         if not result.get("ok"):
             raise RuntimeError(f"Telegram API 拒绝请求: {result.get('description', '未知错误')}")
+        return result
+
+    def send_telegram_message(self, bot_token: str, chat_id: str, text: str) -> dict:
+        """调用 Telegram Bot API；敏感凭据不会进入日志或异常文本。"""
+        result = self._telegram_request(bot_token, "sendMessage", {
+            "chat_id": str(chat_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        })
         message = result.get("result", {})
         return {"message_id": message.get("message_id"), "ok": True}
+
+    def fetch_telegram_updates(self, bot_token: str, offset: int = 0,
+                               limit: int = 100) -> list:
+        """短轮询 Telegram 文本消息；游标由调用方持久化。"""
+        result = self._telegram_request(bot_token, "getUpdates", {
+            "offset": offset,
+            "limit": limit,
+            "timeout": 0,
+            "allowed_updates": ["message"],
+        })
+        updates = result.get("result", [])
+        if not isinstance(updates, list):
+            raise RuntimeError("Telegram API 返回的 updates 格式无效")
+        return updates
+
+    # ---------- GitHub 私有状态仓库 ----------
+
+    @staticmethod
+    def _github_contents_request(token: str, repository: str, path: str,
+                                 payload: Optional[dict] = None) -> Optional[dict]:
+        safe_path = urllib.parse.quote(path.strip("/"), safe="/")
+        url = f"https://api.github.com/repos/{repository}/contents/{safe_path}"
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "ETFQuantAssistant/1.0",
+            },
+            method="GET" if payload is None else "PUT",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            if payload is None and error.code == 404:
+                return None
+            detail = ""
+            try:
+                response_body = json.loads(error.read().decode("utf-8"))
+                detail = str(response_body.get("message", ""))
+            except Exception:
+                pass
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(f"GitHub 状态仓库 API 返回 HTTP {error.code}{suffix}") from None
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"GitHub 状态仓库连接失败: {error.reason}") from None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("GitHub 状态仓库返回了无法解析的响应") from None
+
+    def get_github_repository_file(self, token: str, repository: str,
+                                   path: str) -> Optional[dict]:
+        result = self._github_contents_request(token, repository, path)
+        if result is None:
+            return None
+        try:
+            content = base64.b64decode(result["content"], validate=False)
+            return {"content": content, "sha": str(result["sha"])}
+        except (KeyError, TypeError, ValueError, binascii.Error) as error:
+            raise RuntimeError("GitHub 状态文件格式无效") from error
+
+    def put_github_repository_file(self, token: str, repository: str, path: str,
+                                   content: bytes, message: str,
+                                   sha: Optional[str] = None) -> str:
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content).decode("ascii"),
+        }
+        if sha:
+            payload["sha"] = sha
+        result = self._github_contents_request(token, repository, path, payload)
+        try:
+            return str(result["content"]["sha"])
+        except (KeyError, TypeError) as error:
+            raise RuntimeError("GitHub 状态仓库写入响应格式无效") from error

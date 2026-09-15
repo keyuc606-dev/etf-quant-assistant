@@ -154,4 +154,7 @@ quant_assistant/
 | portfolio.json 损坏报错 | 每次保存自动备份：`cp data/portfolio.json.bak data/portfolio.json` |
 | 回测报告图表空白 | 确认 `data/reports/echarts.min.js` 存在（源文件在 `quant_assistant/backtest/assets/`） |
 
+Telegram 交易反馈的命令格式、私有云端状态和部署步骤见
+[docs/TELEGRAM-trade-feedback.md](docs/TELEGRAM-trade-feedback.md)。
+
 版本历史见 [CHANGELOG.md](CHANGELOG.md)。
