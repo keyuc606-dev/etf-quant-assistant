@@ -167,3 +167,5 @@ def test_workflow_utc_and_shared_lock():
     daily = (workflows / "account-daily-telegram.yml").read_text()
     notify_step = daily.split("- name: Generate and send account daily report", 1)[1]
     assert "ACCOUNT_STATE_TOKEN:" in notify_step and "ACCOUNT_STATE_REPO:" in notify_step
+    assert "inputs.mode == 'intraday'" in daily
+    assert "run: python -m quant_assistant notify-intraday" in daily

@@ -2,6 +2,15 @@ name: Account Daily Telegram
 
 "on":
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Manual validation mode"
+        required: true
+        default: daily
+        type: choice
+        options:
+          - daily
+          - intraday
   schedule:
     # GitHub Actions cron uses UTC. 01:20 UTC = 09:20 Asia/Shanghai.
     - cron: "20 1 * * 1-5"
@@ -41,6 +50,7 @@ jobs:
         run: python -m quant_assistant.cloud_state restore
 
       - name: Generate and send account daily report
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'daily'
         env:
           ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
@@ -51,6 +61,16 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
         run: python -m quant_assistant notify-daily
 
+      - name: Send provisional intraday risk check (manual validation)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'intraday'
+        env:
+          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
+          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
+          ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m quant_assistant notify-intraday
+
       - name: Remove sensitive runtime files
         if: always()
         shell: bash
@@ -58,3 +78,4 @@ jobs:
           rm -f data/portfolio.json data/portfolio.json.bak data/portfolio.json.tmp
           rm -f data/trading.sqlite3 data/trading.sqlite3-shm data/trading.sqlite3-wal
           rm -f data/reports/my-portfolio-daily.md data/reports/my-portfolio-detail.md
+          rm -f data/reports/my-portfolio-intraday.md
