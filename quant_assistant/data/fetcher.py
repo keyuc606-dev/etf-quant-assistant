@@ -477,6 +477,9 @@ class DataFetcher:
             "change_pct": _safe_float(row.get("涨跌幅")),
             "volume": _safe_float(row.get("成交量")),
             "amount": _safe_float(row.get("成交额")),
+            "open": _safe_float(row.get("开盘价")),
+            "previous_close": _safe_float(row.get("昨收")),
+            "quote_updated_at": row.get("更新时间"),
         }
 
     def fetch_realtime_a(self, code: str) -> Optional[dict]:
@@ -484,6 +487,54 @@ class DataFetcher:
 
     def fetch_realtime_hk(self, code: str) -> Optional[dict]:
         return self._lookup_spot("HK", code)
+
+    def fetch_intraday_quote(self, code: str, market: Market,
+                             now: Optional[datetime.datetime] = None) -> Optional[dict]:
+        """Ephemeral quote only; never writes a daily cache or backtest data."""
+        now = (now or datetime.datetime.now(CN_TZ)).astimezone(CN_TZ)
+        if not (datetime.time(9, 30) <= now.time() <= datetime.time(15, 5)):
+            return None
+        if market == Market.HK:
+            return None
+        if market != Market.ETF:
+            # EastMoney's A-share table has no per-quote timestamp. Sina's dated
+            # single-symbol response prevents a previous close posing as live.
+            return self._sina_intraday_quote(code, now)
+        item = self._lookup_spot("ETF", code)
+        if item and item["price"] > 0 and item["volume"] > 0:
+            stamp = pd.to_datetime(item.get("quote_updated_at"), errors="coerce")
+            if not pd.isna(stamp):
+                if stamp.tzinfo is None:
+                    stamp = stamp.tz_localize(CN_TZ)
+                stamp = stamp.tz_convert(CN_TZ)
+                if stamp.date() == now.date() and abs((now - stamp.to_pydatetime()).total_seconds()) <= 900:
+                    return {**item, "source": "eastmoney", "as_of": stamp.isoformat(),
+                            "provisional": True}
+        return self._sina_intraday_quote(code, now)
+
+    def _sina_intraday_quote(self, code: str, now: datetime.datetime) -> Optional[dict]:
+        """Sina single-symbol quote is a fallback for both A shares and exchange ETFs."""
+        exchange = "sh" if code.startswith(("5", "6")) else "sz"
+        request = urllib.request.Request(
+            f"https://hq.sinajs.cn/list={exchange}{code}",
+            headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                raw = response.read().decode("gbk")
+            fields = raw.split('"')[1].split(",")
+            stamp = datetime.datetime.fromisoformat(f"{fields[30]}T{fields[31]}").replace(tzinfo=CN_TZ)
+            price, previous, volume, amount = map(float, (fields[3], fields[2], fields[8], fields[9]))
+            if (stamp.date() != now.date() or abs((now - stamp).total_seconds()) > 900
+                    or price <= 0 or previous <= 0 or volume <= 0):
+                return None
+            return {"code": code, "name": fields[0], "price": price,
+                    "change_pct": (price / previous - 1) * 100, "volume": volume,
+                    "amount": amount, "open": float(fields[1]), "previous_close": previous,
+                    "source": "sina", "as_of": stamp.isoformat(),
+                    "provisional": True}
+        except (IndexError, ValueError, OSError, urllib.error.URLError):
+            return None
 
     def identify_security(self, code: str) -> Optional[dict]:
         """从现有免费行情源识别六位沪深股票或场内 ETF。"""

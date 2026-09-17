@@ -115,7 +115,9 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     detail_path = report_dir / "my-portfolio-detail.md"
     daily_path.write_text(daily, encoding="utf-8")
     detail_path.write_text(detail, encoding="utf-8")
-    return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus)}
+    return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus),
+            "advices": advices, "views": views, "stock_data": stock_data,
+            "advice_mode": advice_mode}
 
 
 def _risk_level(views: List[dict]) -> str:

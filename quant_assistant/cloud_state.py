@@ -55,6 +55,8 @@ def validate_cloud_state(state: dict) -> dict:
     for field in ("pending", "outbox"):
         if telegram.get(field) is not None and not isinstance(telegram[field], dict):
             raise ValueError(f"telegram.{field} 无效")
+    if not isinstance(state.get("advice_records", []), list):
+        raise ValueError("advice_records 必须是列表")
     return state
 
 

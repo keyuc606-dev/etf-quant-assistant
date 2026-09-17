@@ -41,6 +41,12 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 # 10. Telegram 双向交易反馈由 account-trade-telegram.yml 每五分钟轮询
 #     文本格式与私有状态仓库部署见 docs/TELEGRAM-trade-feedback.md
 #     支持一条消息多行成交，整批确认/取消并原子提交。
+
+# 11. v3 建议效果重算（从私有状态仓库原始建议和历史日线重建，不修改原建议）
+.venv\Scripts\python.exe -m quant_assistant advice-recalculate
+
+# 12. v3 盘中风险检查（需先恢复私有账户状态，14:30 工作流自动执行）
+.venv\Scripts\python.exe -m quant_assistant notify-intraday
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -61,6 +67,10 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
 09:20 日报是“前一交易日收盘 + 隔夜新闻的当天作战计划”，不是实时盘中建议。规则层产生全部价格与仓位数字；可选 OpenAI provider 仅压缩文字和排序。GitHub Secret `OPENAI_API_KEY` 未配置或调用失败时自动降级为纯规则版。
+
+v3 在 09:20 推送前，把每个持仓的原始建议追加到私有状态仓库 `state/account-state.json` 的 `advice_records`；同一 advice_id 重试不会覆盖首次记录。`rule_version` 标识规则口径，`code_commit` 保留实际运行 commit。建议日志含真实账户成本、仓位等敏感信息，只能留在私有状态仓库。20 日结算统计仅用建议日之后完整交易日的 OHLC；当天同时触及目标和失效时记为顺序不明，不武断判胜。公开行情的前复权数据可能重算，历史重算结果也可能随数据源修订而变化。成交只有显式 `related_plan_id=advice_id` 时才归因，否则为 unknown。样本不足 10 条时不判断效果。
+
+14:30 工作流只读当日 09:20 建议和私有账户快照，读取带当日更新时间的临时报价；盘中数据带 `provisional`，不写入日线缓存，不运行周度 allocation/rebalance，不自动下单。无当日建议时改为持仓风险快照。A 股盘中报价用新浪带时间戳的单标的免费接口；ETF 优先复用东财快照的更新时间，失败时回退新浪。报价无法验证为当日新鲜数据时只报告降级，不使用昨收冒充。
 
 ## 数据文件与缓存机制
 

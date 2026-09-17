@@ -143,10 +143,13 @@ def cmd_daily(args):
 
 def cmd_notify_daily(args):
     from .notifications.telegram import TelegramNotifier
+    from .v3 import save_morning_advice
 
     reports = cmd_daily(args)
     if not reports:
         raise RuntimeError("日报未生成，Telegram 未发送")
+
+    save_morning_advice(reports)
 
     result = TelegramNotifier().send_daily_report(reports["daily"])
     if not result.success:
@@ -154,6 +157,26 @@ def cmd_notify_daily(args):
             f"日报已正常生成，但 Telegram 推送失败: {result.error}"
         )
     print(f"  Telegram 推送成功: {result.sent_parts} 条消息")
+
+
+def cmd_notify_intraday(args):
+    from .v3 import notify_intraday
+    path = notify_intraday()
+    print(f"盘中风险快照已推送：{path}")
+
+
+def cmd_advice_recalculate(args):
+    from .cloud_state import CloudStateStore
+    from .v3 import recalculate
+    from .advice_performance import render_summary
+    from .trading.service import TradingService
+    from .data.fetcher import CN_TZ
+    state, _ = CloudStateStore().load()
+    _outcomes, summary = recalculate(
+        state.get("advice_records", []), datetime.datetime.now(CN_TZ),
+        executions=TradingService().repository.list_executions(),
+    )
+    print(render_summary(summary))
 
 
 def cmd_backtest(args):
@@ -417,6 +440,12 @@ def main():
     p_notify = sub.add_parser("notify-daily", help="生成30秒账户日报并单向推送到Telegram")
     p_notify.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
     p_notify.set_defaults(func=cmd_notify_daily)
+
+    p_intraday = sub.add_parser("notify-intraday", help="14:30 盘中风险与执行检查")
+    p_intraday.set_defaults(func=cmd_notify_intraday)
+
+    p_perf = sub.add_parser("advice-recalculate", help="从私有原始建议与市场日线重算统计")
+    p_perf.set_defaults(func=cmd_advice_recalculate)
 
     p_bt = sub.add_parser("backtest", help="单标的策略回测")
     p_bt.add_argument("code", help="股票代码，如 600519（A股6位）/ 00700（港股5位）")
