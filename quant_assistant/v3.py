@@ -66,7 +66,7 @@ def save_morning_advice(reports: dict, now: dt.datetime | None = None,
     if summary["settled_count"]:
         stats = summary["overall"]
         value = stats["mean_return"]["10"]
-        line = (f"过去已结算建议：目标先触及 {stats['target_first']}/{summary['settled_count']}，"
+        line = (f"过去20日观察窗口已结算建议：目标先触及 {stats['target_first']}/{summary['settled_count']}，"
                 f"10日平均收益 {value:.2%}。")
     else:
         line = "建议效果追踪：尚无已结算20日样本。"

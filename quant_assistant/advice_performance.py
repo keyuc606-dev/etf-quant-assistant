@@ -166,7 +166,7 @@ def render_summary(summary: dict) -> str:
              f"样本数：{summary['sample_count']}；已结算20日样本：{summary['settled_count']}"]
     if summary["insufficient_sample"]:
         lines.append("样本不足，仅列事实计数，不据此判断策略有效性。")
-    lines.append(f"目标先触及：{overall['target_first']}；失效先触及：{overall['invalidation_first']}；同日均触及（顺序不明）：{overall['same_day_ambiguous']}；均未触及：{overall['neither']}")
+    lines.append(f"20日观察窗口（已结算样本）：目标先触及 {overall['target_first']}；失效先触及 {overall['invalidation_first']}；同日均触及（顺序不明）{overall['same_day_ambiguous']}；均未触及 {overall['neither']}")
     for n in WINDOWS:
         value = overall["mean_return"][str(n)]
         lines.append(f"平均{n}日收益：{value:.2%}" if value is not None else f"平均{n}日收益：样本不足")
@@ -175,7 +175,7 @@ def render_summary(summary: dict) -> str:
         lines.append(f"{label}：{value:.2%}" if value is not None else f"{label}：样本不足")
     lines.append("按操作倾向：")
     for action, group in summary["by_action"].items():
-        lines.append(f"- {action}：{group['samples']} 条；目标先触及 {group['target_first']}；失效先触及 {group['invalidation_first']}；10日平均收益 {group['mean_return']['10']:.2%}")
+        lines.append(f"- {action}：20日已结算 {group['samples']} 条；20日窗口目标先触及 {group['target_first']}；20日窗口失效先触及 {group['invalidation_first']}；10日平均收益 {group['mean_return']['10']:.2%}")
     execution = summary["execution"]
     lines.append(f"实际执行：明确关联 {execution['linked_advice_count']} 条建议；已实现样本 {execution['realized_sample_count']}；已实现盈亏 {execution['total_realized_pnl']:+.2f}。")
     lines.append("未明确关联 advice_id 的成交标记 unknown，不计入实际执行收益。")

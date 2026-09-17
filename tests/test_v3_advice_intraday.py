@@ -52,7 +52,9 @@ def test_summary_sample_warning_version_filter_and_recompute():
     summary = summarize([first, second], outcomes, "v3-advice-1")
     assert summary["sample_count"] == summary["settled_count"] == 1
     assert summary["insufficient_sample"]
-    assert "样本不足" in render_summary(summary)
+    rendered = render_summary(summary)
+    assert "样本不足" in rendered
+    assert "20日观察窗口（已结算样本）：目标先触及" in rendered
     assert summary == summarize([first, second], outcomes, "v3-advice-1")
     assert append_immutable([first], [first]) == [first]
     with pytest.raises(ValueError, match="拒绝覆盖"):
