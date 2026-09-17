@@ -6,12 +6,12 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
-from quant_assistant.advice_performance import (append_immutable, correlate_execution,
+from quant_assistant.advice_performance import (RULE_VERSION, append_immutable, correlate_execution,
                                                  evaluate, summarize,
                                                  render_summary)
 from quant_assistant.data.fetcher import CN_TZ, DataFetcher
 from quant_assistant.models import Market
-from quant_assistant.v3 import build_intraday, classify_quote, recalculate
+from quant_assistant.v3 import build_intraday, classify_quote, recalculate, save_morning_advice
 
 
 def record(version="v3-advice-1"):
@@ -68,6 +68,35 @@ def test_execution_attribution_requires_explicit_advice_id():
     linked = correlate_execution(record(), [{**trade, "related_plan_id": "a1"}])
     assert linked["status"] == "linked"
     assert linked["realized_return"] == pytest.approx(.1)
+
+
+def test_morning_advice_is_read_back_from_private_store_before_report_send(tmp_path):
+    class FakeStore:
+        def __init__(self):
+            self.state = {"advice_records": []}
+        def load(self, _initial):
+            return self.state, "sha"
+        def save(self, state, _sha, _message):
+            self.state = state.copy()
+
+    pos = Mock(code="510300", name="测试ETF", market=Market.ETF,
+               asset_type="ETF", cost_price=100, current_price=100)
+    report = {"daily": tmp_path / "daily.md", "detail": tmp_path / "detail.md",
+              "advices": [{"code": "510300", "action": "HOLD", "buy_range": [95, 99],
+                           "reduce_range": [106, 109], "stop": 90, "target": 110,
+                           "confidence": "中", "ai_note": None}],
+              "views": [{"position": pos, "available": True, "weight": .2,
+                         "data_date": "2026-09-16", "indicators": {"MA20": 98}}],
+              "stock_data": {}}
+    report["daily"].write_text("日报\n", encoding="utf-8")
+    report["detail"].write_text("详细\n", encoding="utf-8")
+    fake = FakeStore()
+    with patch("quant_assistant.v3.TradingService") as service, \
+         patch("quant_assistant.v3.recalculate", return_value=([], summarize([], [], RULE_VERSION))):
+        service.return_value.repository.list_executions.return_value = []
+        save_morning_advice(report, dt.datetime(2026, 9, 17, 9, 20, tzinfo=CN_TZ), fake)
+    assert len(fake.state["advice_records"]) == 1
+    assert "建议效果追踪" in report["detail"].read_text(encoding="utf-8")
 
 
 def test_recalculate_fetches_oldest_history_and_excludes_incomplete_today():

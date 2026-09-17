@@ -58,6 +58,11 @@ def save_morning_advice(reports: dict, now: dt.datetime | None = None,
     if len(combined) != len(existing):
         state["advice_records"] = combined
         store.save(state, sha, f"Record morning advice {now.astimezone(CN_TZ).date()}")
+    persisted, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
+    persisted_by_id = {row["advice_id"]: row for row in persisted.get("advice_records", [])}
+    if any(persisted_by_id.get(row["advice_id"]) != row for row in incoming):
+        raise RuntimeError("建议审计记录写入后回读不一致，Telegram 未发送")
+    print("建议审计：私有状态仓库回读验证成功（未输出账户明细）")
     outcomes, summary = recalculate(combined, now, fetcher,
                                     TradingService().repository.list_executions())
     detail = Path(reports["detail"])
@@ -112,7 +117,8 @@ def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = 
     return {"status": status, "flags": flags, "rule": rule}
 
 
-def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime) -> str:
+def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
+                   quality: dict | None = None) -> str:
     day = now.astimezone(CN_TZ).date().isoformat()
     morning = {r["code"]: r for r in records if r["as_of"] == day}
     rows = []
@@ -128,6 +134,9 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime) -> str:
                     "进入买入区": 3, "今日不追高": 4, "持仓风险快照": 5, "等待": 6}
         rows.append((priority[verdict["status"]], pos.code, pos, quote, advice, verdict))
     rows.sort(key=lambda item: (item[0], item[1]))
+    if quality is not None:
+        quality.update({"morning_advice": bool(morning), "fresh_provisional": bool(rows),
+                        "degraded": bool(degraded)})
     lines = [f"14:30 盘中风险/执行检查｜{day} 北京时间", "盘中数据均为 provisional，仅供人工复核；不生成正式交易清单。"]
     if not morning:
         lines.append("今日09:20建议不存在，以下仅为持仓盘中风险快照。")
@@ -154,7 +163,10 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     store = store or CloudStateStore()
     state, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     fetcher = fetcher or DataFetcher()
-    text = build_intraday(PortfolioManager(), state.get("advice_records", []), fetcher, now)
+    quality = {}
+    text = build_intraday(PortfolioManager(), state.get("advice_records", []), fetcher,
+                          now, quality)
+    print("盘中数据校验：当日建议={morning_advice}；新鲜provisional报价={fresh_provisional}；存在降级={degraded}".format(**quality))
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "my-portfolio-intraday.md"
     path.write_text(text + "\n", encoding="utf-8")
