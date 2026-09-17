@@ -1,6 +1,7 @@
 import datetime as dt
+import io
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
@@ -115,6 +116,7 @@ def test_stale_eastmoney_quote_falls_back_and_never_uses_yesterday():
         "change_pct": 0, "volume": 100, "amount": 10000,
         "quote_updated_at": pd.Timestamp("2026-09-16 14:30:00", tz=CN_TZ)})
     fetcher._sina_intraday_quote = Mock(return_value=None)
+    fetcher._tencent_intraday_quote = Mock(return_value=None)
     now = dt.datetime(2026, 9, 17, 14, 30, tzinfo=CN_TZ)
     assert fetcher.fetch_intraday_quote("510300", Market.ETF, now) is None
     fallback = {"price": 101, "provisional": True, "source": "sina"}
@@ -123,6 +125,9 @@ def test_stale_eastmoney_quote_falls_back_and_never_uses_yesterday():
     fetcher._lookup_spot.reset_mock()
     assert fetcher.fetch_intraday_quote("600000", Market.A_SH, now) == fallback
     fetcher._lookup_spot.assert_not_called()
+    fetcher._sina_intraday_quote.return_value = None
+    fetcher._tencent_intraday_quote.return_value = {**fallback, "source": "tencent"}
+    assert fetcher.fetch_intraday_quote("600000", Market.A_SH, now)["source"] == "tencent"
 
 
 def test_gap_and_volume_flags():
@@ -131,6 +136,23 @@ def test_gap_and_volume_flags():
     result = classify_quote(record(), quote, avg_volume=100)
     assert result["status"] == "进入买入区"
     assert result["flags"] == ["大幅跳空", "成交量异常"]
+
+
+def test_tencent_fallback_requires_fresh_timestamp():
+    fetcher = DataFetcher.__new__(DataFetcher)
+    fields = [""] * 38
+    fields[1], fields[3], fields[4], fields[5] = "测试", "101", "100", "96"
+    fields[30], fields[36], fields[37] = "20260917142900", "1200", "20"
+    raw = ('v_sh600000="' + "~".join(fields) + '";').encode("gbk")
+    now = dt.datetime(2026, 9, 17, 14, 30, tzinfo=CN_TZ)
+    with patch("quant_assistant.data.fetcher.urllib.request.urlopen", return_value=io.BytesIO(raw)):
+        result = fetcher._tencent_intraday_quote("600000", now)
+    assert result["source"] == "tencent" and result["volume"] == 1200
+    assert result["amount"] == 200000
+    fields[30] = "20260916142900"
+    raw = ('v_sh600000="' + "~".join(fields) + '";').encode("gbk")
+    with patch("quant_assistant.data.fetcher.urllib.request.urlopen", return_value=io.BytesIO(raw)):
+        assert fetcher._tencent_intraday_quote("600000", now) is None
 
 
 def test_workflow_utc_and_shared_lock():

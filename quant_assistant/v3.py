@@ -137,7 +137,7 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime) -> str:
         zone = (f"买入区 {buy[0]:.3f}–{buy[1]:.3f}；减仓区 {reduce[0]:.3f}–{reduce[1]:.3f}"
                 if buy and reduce else "早间区间不可用")
         lines.append(f"{pos.name} {pos.code}｜{quote['price']:.3f} ({quote['change_pct']:+.2f}%)｜{verdict['status']}")
-        lines.append(f"  成交量 {quote['volume']:,.0f}；成交额 {quote['amount']:,.0f}；报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '数据源未知')}）")
+        lines.append(f"  成交量 {quote['volume']:,.0f} 手；成交额 ￥{quote['amount']:,.0f}；报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '数据源未知')}）")
         lines.append(f"  {zone}；{verdict['rule']}。" + ("；" + "、".join(verdict["flags"]) if verdict["flags"] else ""))
     if degraded:
         lines.append("实时数据不可用，已降级；未用昨收冒充盘中价：" + "；".join(degraded))

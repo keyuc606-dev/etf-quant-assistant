@@ -499,7 +499,8 @@ class DataFetcher:
         if market != Market.ETF:
             # EastMoney's A-share table has no per-quote timestamp. Sina's dated
             # single-symbol response prevents a previous close posing as live.
-            return self._sina_intraday_quote(code, now)
+            return (self._sina_intraday_quote(code, now)
+                    or self._tencent_intraday_quote(code, now))
         item = self._lookup_spot("ETF", code)
         if item and item["price"] > 0 and item["volume"] > 0:
             stamp = pd.to_datetime(item.get("quote_updated_at"), errors="coerce")
@@ -510,7 +511,8 @@ class DataFetcher:
                 if stamp.date() == now.date() and abs((now - stamp.to_pydatetime()).total_seconds()) <= 900:
                     return {**item, "source": "eastmoney", "as_of": stamp.isoformat(),
                             "provisional": True}
-        return self._sina_intraday_quote(code, now)
+        return (self._sina_intraday_quote(code, now)
+                or self._tencent_intraday_quote(code, now))
 
     def _sina_intraday_quote(self, code: str, now: datetime.datetime) -> Optional[dict]:
         """Sina single-symbol quote is a fallback for both A shares and exchange ETFs."""
@@ -529,10 +531,34 @@ class DataFetcher:
                     or price <= 0 or previous <= 0 or volume <= 0):
                 return None
             return {"code": code, "name": fields[0], "price": price,
-                    "change_pct": (price / previous - 1) * 100, "volume": volume,
+                    "change_pct": (price / previous - 1) * 100, "volume": volume / 100,
                     "amount": amount, "open": float(fields[1]), "previous_close": previous,
                     "source": "sina", "as_of": stamp.isoformat(),
                     "provisional": True}
+        except (IndexError, ValueError, OSError, urllib.error.URLError):
+            return None
+
+    def _tencent_intraday_quote(self, code: str, now: datetime.datetime) -> Optional[dict]:
+        """Independent dated quote fallback; Tencent volume is already in lots."""
+        exchange = "sh" if code.startswith(("5", "6")) else "sz"
+        request = urllib.request.Request(
+            f"https://qt.gtimg.cn/q={exchange}{code}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                raw = response.read().decode("gbk")
+            fields = raw.split('"')[1].split("~")
+            stamp = datetime.datetime.strptime(fields[30], "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
+            price, previous, opened = map(float, (fields[3], fields[4], fields[5]))
+            volume, amount = float(fields[36]), float(fields[37]) * 10000
+            if (stamp.date() != now.date() or abs((now - stamp).total_seconds()) > 900
+                    or price <= 0 or previous <= 0 or volume <= 0):
+                return None
+            return {"code": code, "name": fields[1], "price": price,
+                    "change_pct": (price / previous - 1) * 100, "volume": volume,
+                    "amount": amount, "open": opened, "previous_close": previous,
+                    "source": "tencent", "as_of": stamp.isoformat(), "provisional": True}
         except (IndexError, ValueError, OSError, urllib.error.URLError):
             return None
 
