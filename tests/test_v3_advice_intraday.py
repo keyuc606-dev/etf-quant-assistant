@@ -169,6 +169,35 @@ def test_gap_and_volume_flags():
     assert result["flags"] == ["大幅跳空", "成交量异常"]
 
 
+@pytest.mark.parametrize("price, expected", [
+    (97, "进入买入区"),
+    (107, "接近减仓区"),
+    (90, "失效"),
+    (110, "目标已达"),
+])
+def test_intraday_status_uses_morning_advice_levels(price, expected):
+    quote = {"price": price, "change_pct": (price / 100 - 1) * 100,
+             "volume": 100, "amount": price * 10000}
+    assert classify_quote(record(), quote)["status"] == expected
+
+
+def test_intraday_report_uses_only_todays_advice():
+    position = Mock(code="510300", name="测试ETF", market=Market.ETF)
+    fetcher = Mock()
+    fetcher.fetch_intraday_quote.return_value = {
+        "price": 97, "change_pct": -3, "volume": 100,
+        "amount": 970000, "as_of": "2026-09-17T14:29:00+08:00",
+        "source": "sina", "provisional": True,
+    }
+    now = dt.datetime(2026, 9, 17, 14, 30, tzinfo=CN_TZ)
+    yesterday = {**record(), "as_of": "2026-09-16"}
+    today = {**record(), "as_of": "2026-09-17"}
+    assert "进入买入区" in build_intraday(Mock(positions=[position]), [yesterday, today], fetcher, now)
+    stale = build_intraday(Mock(positions=[position]), [yesterday], fetcher, now)
+    assert "仅为持仓盘中风险快照" in stale
+    assert "进入买入区" not in stale
+
+
 def test_tencent_fallback_requires_fresh_timestamp():
     fetcher = DataFetcher.__new__(DataFetcher)
     fields = [""] * 38
