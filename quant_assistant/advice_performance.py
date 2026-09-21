@@ -21,6 +21,7 @@ RULE_VERSION = "v3-advice-1"
 def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[dict]:
     as_of = generated_at.astimezone(CN_TZ).date().isoformat()
     by_code = {a["code"]: a for a in reports["advices"]}
+    disciplines = reports.get("disciplines", {})
     records = []
     for view in reports["views"]:
         pos = view["position"]
@@ -48,6 +49,8 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "data_cutoff": view["data_date"],
             "ai_text_assisted": bool(advice.get("ai_note")),
             "technical_features": view["indicators"],
+            "discipline_version": disciplines.get(pos.code, {}).get("version"),
+            "discipline": disciplines.get(pos.code),
         })
     return records
 

@@ -9,6 +9,7 @@ import pandas as pd
 
 from ..analysis.indicators import get_signals
 from ..analysis.account_advice import build_rule_advices
+from ..analysis.discipline import build_discipline, cash_defense, short_note
 from ..config import ETF_POOL, REPORT_DIR
 
 
@@ -89,7 +90,7 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
                              theme_observations: Optional[Dict[str, dict]] = None,
                              report_dir: Optional[Path] = None,
                              generated_at: Optional[datetime.datetime] = None,
-                             advice_provider=None) -> dict:
+                             advice_provider=None, executions=None) -> dict:
     report_dir = Path(report_dir) if report_dir is not None else REPORT_DIR
     report_dir.mkdir(parents=True, exist_ok=True)
     stock_data = stock_data or {}
@@ -102,14 +103,19 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     if advice_provider is not None:
         advices, advice_mode = advice_provider.enhance(advices)
     advice_by_code = {item["code"]: item for item in advices}
+    cash_note = cash_defense(pm, views)
+    disciplines = {view["position"].code: build_discipline(
+        view, stock_data.get(view["position"].code),
+        advice_by_code[view["position"].code], cash_note, executions,
+        generated_at) for view in views}
     focus = select_focus_positions(views)
     advice_order = {item["code"]: index for index, item in enumerate(advices)}
     focus.sort(key=lambda item: advice_order.get(item["position"].code, len(advices)))
     daily = _render_daily(pm, views, focus, news_result, generated_at,
-                          advice_by_code, advice_mode)
+                          advice_by_code, advice_mode, disciplines)
     detail = _render_detail(
         pm, views, alerts or [], fetch_errors or [], news_result, generated_at,
-        advice_by_code, advice_mode,
+        advice_by_code, advice_mode, disciplines,
     )
     daily_path = report_dir / "my-portfolio-daily.md"
     detail_path = report_dir / "my-portfolio-detail.md"
@@ -117,7 +123,7 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     detail_path.write_text(detail, encoding="utf-8")
     return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus),
             "advices": advices, "views": views, "stock_data": stock_data,
-            "advice_mode": advice_mode}
+            "advice_mode": advice_mode, "disciplines": disciplines}
 
 
 def _risk_level(views: List[dict]) -> str:
@@ -135,7 +141,7 @@ def _risk_level(views: List[dict]) -> str:
 
 def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
                   generated_at: datetime.datetime, advice_by_code: dict,
-                  advice_mode: str) -> str:
+                  advice_mode: str, disciplines: dict) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0.0
@@ -196,6 +202,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
             f"- 操作倾向：{advice['action_label']}；建议仓位变化：{advice['position_change']}；置信度：{advice['confidence']}",
             f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
             f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
+            f"- 交易纪律：{short_note(disciplines[pos.code])}",
             f"- 核心理由：{advice['ai_note'] or '；'.join(advice['reasons'][:2])}",
         ])
         if item["pnl_pct"] is not None and item["pnl_pct"] <= -0.15:
@@ -209,6 +216,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         f"- 当前现金：￥{pm.cash:,.2f}",
         f"- 现金比例：{cash_ratio:.1%}",
         f"- 仓位压力：{pressure}",
+        f"- {cash_defense(pm, views)}",
         "- 当前系统尚没有足够信息判断是否应该使用现金。",
         "",
         "## 四、仓位风险",
@@ -240,7 +248,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         "",
         "## 六、今日摘要",
         "",
-        f"- 当前现金比例 {cash_ratio:.1%}，流动性较充足。",
+        f"- {cash_defense(pm, views)}。",
         f"- 当前{'无' if max_weight <= 0.20 else '有'}单一股票或 ETF 仓位超过 20%。",
         f"- 短期偏弱、超卖或波动较大的重点项：{'、'.join(weak_names) if weak_names else '无'}。",
         f"- 出现短期技术改善信号的重点项：{'、'.join(improving) if improving else '无'}；不能单凭技术交叉判断反转。",
@@ -267,7 +275,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
 
 def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
                    news_result: dict, generated_at: datetime.datetime,
-                   advice_by_code: dict, advice_mode: str) -> str:
+                   advice_by_code: dict, advice_mode: str, disciplines: dict) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     cash_ratio = pm.cash / pm.total_assets if pm.total_assets > 0 else 0.0
@@ -316,6 +324,20 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
             f"{advice['position_change']} | {advice['confidence']} | "
             f"{advice['ai_note'] or '；'.join(advice['reasons'])} |"
         )
+    lines.extend(["", "## 交易纪律实验标签（discipline-v1）", "",
+                  "仅供人工复核，不改变原建议、ETF交易清单或效果结算口径。", ""])
+    for item in views:
+        pos = item["position"]
+        d = disciplines[pos.code]
+        lines.extend([
+            f"### {pos.name}（{pos.code}）", "",
+            f"- 状态：{d['discipline_state']}；动作：{d['discipline_action']}",
+            f"- 禁止：{d['forbidden_action']}",
+            f"- 再评估条件：{d['reentry_condition']}",
+            f"- T机会：{d['t_opportunity']}",
+            f"- 现金防守：{d['cash_defense_note']}",
+            f"- 理由：{d['reason']}；近期卖出证据：{d['sale_status']}", "",
+        ])
     lines.extend([
         "",
         "## 全部技术指标：趋势与动量",

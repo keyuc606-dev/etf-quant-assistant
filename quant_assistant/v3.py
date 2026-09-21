@@ -8,6 +8,7 @@ from .advice_performance import (RULE_VERSION, append_immutable, correlate_execu
                                  evaluate, make_records, render_summary, summarize)
 from .cloud_state import CloudStateStore
 from .config import REPORT_DIR
+from .analysis.discipline import sale_chase_alert, short_note, t_opportunity
 from .data.fetcher import CN_TZ, DataFetcher
 from .models import Market
 from .portfolio.holdings import PortfolioManager
@@ -118,7 +119,8 @@ def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = 
 
 
 def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
-                   quality: dict | None = None) -> str:
+                   quality: dict | None = None,
+                   executions: list[dict] | None = None) -> str:
     day = now.astimezone(CN_TZ).date().isoformat()
     morning = {r["code"]: r for r in records if r["as_of"] == day}
     rows = []
@@ -148,6 +150,20 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
         lines.append(f"{pos.name} {pos.code}｜{quote['price']:.3f} ({quote['change_pct']:+.2f}%)｜{verdict['status']}")
         lines.append(f"  成交量 {quote['volume']:,.0f} 手；成交额 ￥{quote['amount']:,.0f}；报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '数据源未知')}）")
         lines.append(f"  {zone}；{verdict['rule']}。" + ("；" + "、".join(verdict["flags"]) if verdict["flags"] else ""))
+        discipline = advice.get("discipline") if advice else None
+        if discipline:
+            if verdict["status"] == "失效":
+                reminder = "趋势/失效位破坏，禁止继续摊平；人工复核风险。"
+            elif sale_chase_alert(pos.code, executions, now, quote["price"],
+                                  (advice.get("technical_features") or {}).get("ATR")):
+                reminder = "近期卖出后继续上涨，禁止情绪化追回；仅回踩早间规则买入区并重新企稳后人工评估。"
+            elif executions is None and discipline.get("discipline_state") == "卖飞/减仓后续涨":
+                reminder = short_note(discipline)
+            else:
+                atr = (advice.get("technical_features") or {}).get("ATR")
+                reminder = t_opportunity({"buy_range": buy, "reduce_range": reduce,
+                                          "asset_type": advice.get("asset_type")}, atr, quote)
+            lines.append(f"  交易纪律：{reminder}（provisional，仅供人工复核）")
     if degraded:
         lines.append("实时数据不可用，已降级；未用昨收冒充盘中价：" + "；".join(degraded))
     if not rows:
@@ -165,7 +181,8 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     fetcher = fetcher or DataFetcher()
     quality = {}
     text = build_intraday(PortfolioManager(), state.get("advice_records", []), fetcher,
-                          now, quality)
+                          now, quality,
+                          TradingService().repository.list_executions())
     print("盘中数据校验：当日建议={morning_advice}；新鲜provisional报价={fresh_provisional}；存在降级={degraded}".format(**quality))
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "my-portfolio-intraday.md"

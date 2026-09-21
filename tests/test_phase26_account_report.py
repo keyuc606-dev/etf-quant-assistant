@@ -86,6 +86,8 @@ class AccountReportTest(unittest.TestCase):
         detail = paths["detail"].read_text(encoding="utf-8")
 
         self.assertIn("高亏损仓位 / 重点复核", daily)
+        self.assertIn("- 交易纪律：", daily)
+        self.assertIn("## 交易纪律实验标签（discipline-v1）", detail)
         self.assertIn("当前尚未接入 AI 综合判断", daily)
         self.assertNotIn("建议买入", daily + detail)
         self.assertNotIn("建议卖出", daily + detail)

@@ -140,6 +140,7 @@ def cmd_daily(args):
         news_result=news_result,
         theme_observations=theme_observations,
         advice_provider=OpenAIAdviceProvider(result["fetcher"]),
+        executions=(trading.repository.list_executions() if trading.is_initialized() else None),
     )
     print(f"  账户日报: {reports['daily']}")
     print(f"  详细报告: {reports['detail']}")
