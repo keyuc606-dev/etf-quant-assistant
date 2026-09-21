@@ -13,6 +13,7 @@
   python -m quant_assistant notify-daily          # 生成30秒日报并单向推送到Telegram
 """
 import sys
+import os
 import argparse
 import datetime
 
@@ -103,6 +104,10 @@ def cmd_daily(args):
     if result["fetch_errors"]:
         print(f"\n  [警告] 以下标的行情获取失败；仅在已有有效旧价格时沿用，"
               f"否则不计算盈亏: {', '.join(result['fetch_errors'])}")
+    degraded_sources = getattr(result["fetcher"], "degraded_sources", [])
+    if degraded_sources:
+        print("  [警告/降级] 主行情源失败，备用源已成功提供行情: "
+              + ", ".join(degraded_sources))
 
     dashboard_alerts = []
     if emergency.get("triggered"):
@@ -138,19 +143,32 @@ def cmd_daily(args):
     )
     print(f"  账户日报: {reports['daily']}")
     print(f"  详细报告: {reports['detail']}")
+    reports["market_data_count"] = len(result["stock_data"])
     return reports
 
 
 def cmd_notify_daily(args):
     from .notifications.telegram import TelegramNotifier
-    from .v3 import save_morning_advice
+    from .v3 import cloud_available, save_morning_advice
 
-    reports = cmd_daily(args)
+    try:
+        reports = cmd_daily(args)
+    except Exception as error:
+        raise RuntimeError(f"日报生成失败: {error}") from error
     if not reports:
         raise RuntimeError("日报未生成，Telegram 未发送")
+    if reports.get("market_data_count", 1) == 0:
+        raise RuntimeError("全部持仓行情不可用，日报缺少有效行情，Telegram 未发送")
+    if os.getenv("GITHUB_ACTIONS") == "true" and not cloud_available():
+        raise RuntimeError("云端建议状态凭据缺失，Telegram 未发送")
 
-    save_morning_advice(reports)
+    print("  建议审计：开始写入并回读私有状态")
+    try:
+        save_morning_advice(reports)
+    except Exception as error:
+        raise RuntimeError(f"建议/状态持久化失败，Telegram 未发送: {error}") from error
 
+    print("  Telegram：开始发送日报")
     result = TelegramNotifier().send_daily_report(reports["daily"])
     if not result.success:
         raise RuntimeError(
@@ -513,10 +531,12 @@ def main():
         args.func(args)
     except RuntimeError as e:
         # 数据文件损坏等已知错误：打印可读信息而非堆栈
-        print(f"\n错误: {e}", file=sys.stderr)
+        sys.stdout.flush()
+        print(f"\n[致命错误] {e}", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
         # 参数格式错误（如 --start 不是 YYYY-MM-DD）：给可读提示而非堆栈
+        sys.stdout.flush()
         print(f"\n参数错误: {e}", file=sys.stderr)
         sys.exit(2)
     except KeyboardInterrupt:

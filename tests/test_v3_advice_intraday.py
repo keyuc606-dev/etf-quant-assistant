@@ -1,5 +1,7 @@
 import datetime as dt
 import io
+import json
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -75,15 +77,15 @@ def test_morning_advice_is_read_back_from_private_store_before_report_send(tmp_p
         def __init__(self):
             self.state = {"advice_records": []}
         def load(self, _initial):
-            return self.state, "sha"
+            return json.loads(json.dumps(self.state)), "sha"
         def save(self, state, _sha, _message):
-            self.state = state.copy()
+            self.state = json.loads(json.dumps(state))
 
-    pos = Mock(code="510300", name="测试ETF", market=Market.ETF,
-               asset_type="ETF", cost_price=100, current_price=100)
+    pos = SimpleNamespace(code="510300", name="测试ETF", market=Market.ETF,
+                          asset_type="ETF", cost_price=100, current_price=100)
     report = {"daily": tmp_path / "daily.md", "detail": tmp_path / "detail.md",
-              "advices": [{"code": "510300", "action": "HOLD", "buy_range": [95, 99],
-                           "reduce_range": [106, 109], "stop": 90, "target": 110,
+              "advices": [{"code": "510300", "action": "HOLD", "buy_range": (95, 99),
+                           "reduce_range": (106, 109), "stop": 90, "target": 110,
                            "confidence": "中", "ai_note": None}],
               "views": [{"position": pos, "available": True, "weight": .2,
                          "data_date": "2026-09-16", "indicators": {"MA20": 98}}],
@@ -95,7 +97,9 @@ def test_morning_advice_is_read_back_from_private_store_before_report_send(tmp_p
          patch("quant_assistant.v3.recalculate", return_value=([], summarize([], [], RULE_VERSION))):
         service.return_value.repository.list_executions.return_value = []
         save_morning_advice(report, dt.datetime(2026, 9, 17, 9, 20, tzinfo=CN_TZ), fake)
+        save_morning_advice(report, dt.datetime(2026, 9, 17, 9, 20, tzinfo=CN_TZ), fake)
     assert len(fake.state["advice_records"]) == 1
+    assert fake.state["advice_records"][0]["buy_zone"] == [95, 99]
     assert "建议效果追踪" in report["detail"].read_text(encoding="utf-8")
 
 

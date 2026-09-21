@@ -37,7 +37,9 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "as_of": as_of, "code": pos.code, "name": pos.name,
             "asset_type": pos.asset_type or ("ETF" if pos.market.name == "ETF" else "STOCK"),
             "market": pos.market.name, "action_tendency": advice["action"],
-            "buy_zone": advice["buy_range"], "reduce_zone": advice["reduce_range"],
+            # JSON 持久化会把 tuple 转为 list；记录在首次比较前就统一为 JSON 形态。
+            "buy_zone": list(advice["buy_range"]) if advice["buy_range"] is not None else None,
+            "reduce_zone": list(advice["reduce_range"]) if advice["reduce_range"] is not None else None,
             "invalidation_price": advice["stop"], "target_price": advice["target"],
             "confidence": advice["confidence"], "position_weight": view["weight"],
             "cost_basis": float(pos.cost_price), "reference_close": reference,

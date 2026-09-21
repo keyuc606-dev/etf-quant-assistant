@@ -99,6 +99,66 @@ class MvpMobileTest(unittest.TestCase):
         daily.assert_called_once()
         notifier.send_daily_report.assert_called_once_with(self.report)
 
+    def test_notify_daily_backup_market_data_still_sends(self):
+        from quant_assistant.__main__ import cmd_notify_daily
+
+        notifier = Mock()
+        notifier.send_daily_report.return_value = SimpleNamespace(success=True, sent_parts=1)
+        reports = {"daily": self.report, "market_data_count": 1}
+        with patch("quant_assistant.__main__.cmd_daily", return_value=reports), \
+             patch("quant_assistant.v3.save_morning_advice") as save, \
+             patch("quant_assistant.notifications.telegram.TelegramNotifier", return_value=notifier):
+            cmd_notify_daily(Namespace(days=120))
+        save.assert_called_once_with(reports)
+        notifier.send_daily_report.assert_called_once_with(self.report)
+
+    def test_notify_daily_no_market_data_is_fatal_before_persisting(self):
+        from quant_assistant.__main__ import cmd_notify_daily
+
+        with patch("quant_assistant.__main__.cmd_daily",
+                   return_value={"daily": self.report, "market_data_count": 0}), \
+             patch("quant_assistant.v3.save_morning_advice") as save, \
+             patch("quant_assistant.notifications.telegram.TelegramNotifier") as notifier:
+            with self.assertRaisesRegex(RuntimeError, "全部持仓行情不可用"):
+                cmd_notify_daily(Namespace(days=120))
+        save.assert_not_called()
+        notifier.assert_not_called()
+
+    def test_notify_daily_state_failure_is_fatal_before_telegram(self):
+        from quant_assistant.__main__ import cmd_notify_daily
+
+        with patch("quant_assistant.__main__.cmd_daily",
+                   return_value={"daily": self.report, "market_data_count": 1}), \
+             patch("quant_assistant.v3.save_morning_advice",
+                   side_effect=RuntimeError("回读不一致")), \
+             patch("quant_assistant.notifications.telegram.TelegramNotifier") as notifier:
+            with self.assertRaisesRegex(RuntimeError, "建议/状态持久化失败.*回读不一致"):
+                cmd_notify_daily(Namespace(days=120))
+        notifier.assert_not_called()
+
+    def test_notify_daily_cloud_credentials_missing_in_actions_is_fatal(self):
+        from quant_assistant.__main__ import cmd_notify_daily
+
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True), \
+             patch("quant_assistant.__main__.cmd_daily",
+                   return_value={"daily": self.report, "market_data_count": 1}), \
+             patch("quant_assistant.v3.save_morning_advice") as save:
+            with self.assertRaisesRegex(RuntimeError, "云端建议状态凭据缺失"):
+                cmd_notify_daily(Namespace(days=120))
+        save.assert_not_called()
+
+    def test_notify_daily_telegram_failure_is_fatal(self):
+        from quant_assistant.__main__ import cmd_notify_daily
+
+        notifier = Mock()
+        notifier.send_daily_report.return_value = SimpleNamespace(success=False, error="HTTP 502")
+        with patch("quant_assistant.__main__.cmd_daily",
+                   return_value={"daily": self.report, "market_data_count": 1}), \
+             patch("quant_assistant.v3.save_morning_advice"), \
+             patch("quant_assistant.notifications.telegram.TelegramNotifier", return_value=notifier):
+            with self.assertRaisesRegex(RuntimeError, "Telegram 推送失败: HTTP 502"):
+                cmd_notify_daily(Namespace(days=120))
+
 
 if __name__ == "__main__":
     unittest.main()

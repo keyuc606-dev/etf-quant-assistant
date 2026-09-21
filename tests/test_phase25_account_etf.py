@@ -105,6 +105,37 @@ class AccountEtfSeparationTest(unittest.TestCase):
 
         self.assertEqual(list(frame["收盘"]), [1.1, 1.15])
         self.assertIn("涨跌幅", frame.columns)
+        self.assertEqual(fetcher.degraded_sources, ["561550"])
+
+    def test_stock_primary_failure_with_sina_success_is_degraded(self):
+        sina = pd.DataFrame({
+            "date": ["2026-09-10", "2026-09-11"],
+            "open": [10.0, 10.1], "high": [10.2, 10.3],
+            "low": [9.9, 10.0], "close": [10.1, 10.2],
+            "volume": [1000, 1200], "amount": [10100, 12240],
+        })
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fetcher = DataFetcher(Path(temp_dir))
+            fetcher.max_retries = 0
+            with mock.patch.object(fetcher, "_maybe_refresh_trade_calendar"), \
+                 mock.patch("quant_assistant.data.fetcher.ak.stock_zh_a_hist",
+                            side_effect=ConnectionError("东财断连")), \
+                 mock.patch("quant_assistant.data.fetcher.ak.stock_zh_a_daily", return_value=sina), \
+                 mock.patch("quant_assistant.data.fetcher.time.sleep"):
+                frame = fetcher.fetch_hist("002074", Market.A_SZ, days=120)
+        self.assertEqual(float(frame.iloc[-1]["收盘"]), 10.2)
+        self.assertEqual(fetcher.degraded_sources, ["002074"])
+
+    def test_stock_primary_and_backup_failure_has_no_market_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fetcher = DataFetcher(Path(temp_dir))
+            fetcher.max_retries = 0
+            with mock.patch.object(fetcher, "_maybe_refresh_trade_calendar"), \
+                 mock.patch("quant_assistant.data.fetcher.ak.stock_zh_a_hist", return_value=None), \
+                 mock.patch("quant_assistant.data.fetcher.ak.stock_zh_a_daily", return_value=None):
+                frame = fetcher.fetch_hist("002074", Market.A_SZ, days=120)
+        self.assertIsNone(frame)
+        self.assertEqual(fetcher.degraded_sources, [])
 
     def test_dashboard_marks_missing_price_as_unavailable(self):
         manager = PortfolioManager(self.portfolio_path)

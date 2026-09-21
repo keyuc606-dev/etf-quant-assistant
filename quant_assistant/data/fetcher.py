@@ -127,6 +127,7 @@ class DataFetcher:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_retries = 2
         self._spot_cache: dict = {}  # 全市场实时快照表，按市场缓存，进程内复用
+        self.degraded_sources: list[str] = []  # 主源失败后由备用历史行情成功接管的代码
 
     def _fetch_with_retry(self, fetch_fn, code: str, retries: Optional[int] = None):
         """带重试的数据获取，每次自动绕过代理直连数据源"""
@@ -275,6 +276,7 @@ class DataFetcher:
         # A股和ETF都有免费新浪备用源；主源失败时立即切换，避免24标的账户被逐项重试拖慢。
         primary_retries = 0 if market in (Market.A_SH, Market.A_SZ, Market.ETF) else None
         df = self._fetch_with_retry(_do_fetch, code, retries=primary_retries)
+        used_sina = False
 
         # 东财接口偶发主动断开连接。ETF 使用 AkShare 自带的新浪公开历史行情
         # 作为免费降级源；联网仍严格封装在本模块内，不改变缓存与陈旧数据门禁。
@@ -300,7 +302,7 @@ class DataFetcher:
                         df["涨跌幅"] = pd.to_numeric(
                             df["收盘"], errors="coerce"
                         ).pct_change() * 100
-                    print(f"  {code}: 已切换到新浪 ETF 公开历史行情备用源")
+                    used_sina = True
 
         # A股同样提供新浪免费历史行情降级，避免东财单点故障导致股票账户全量不可用。
         if (df is None or df.empty) and market in (Market.A_SH, Market.A_SZ):
@@ -328,7 +330,7 @@ class DataFetcher:
                         df["涨跌幅"] = pd.to_numeric(
                             df["收盘"], errors="coerce"
                         ).pct_change() * 100
-                    print(f"  {code}: 已切换到新浪 A股公开历史行情备用源")
+                    used_sina = True
 
         if df is None or df.empty:
             if cached is not None:
@@ -353,8 +355,12 @@ class DataFetcher:
             return None
 
         _atomic_write_csv(self._cache_path(code, period), df)
+        sliced = self._slice(df, want_start)
+        if used_sina and sliced is not None and not sliced.empty:
+            self.degraded_sources.append(code)
+            print(f"  [警告/降级] {code}: 东财主源不可用，已切换到新浪公开历史行情备用源")
         time.sleep(1)
-        return self._slice(df, want_start)
+        return sliced
 
     def fetch_nav(self, code: str, start_date, offline: bool = False) -> Optional[pd.DataFrame]:
         """拉取 ETF 累计净值，缓存为 {code}_nav.csv。
