@@ -94,6 +94,8 @@ class MvpMobileTest(unittest.TestCase):
         notifier = Mock()
         notifier.send_daily_report.return_value = SimpleNamespace(success=True, sent_parts=1)
         with patch("quant_assistant.__main__.cmd_daily", return_value={"daily": self.report}) as daily, \
+             patch("quant_assistant.v3.cloud_available", return_value=True), \
+             patch("quant_assistant.v3.save_morning_advice"), \
              patch("quant_assistant.notifications.telegram.TelegramNotifier", return_value=notifier):
             cmd_notify_daily(Namespace(days=120))
         daily.assert_called_once()
@@ -106,6 +108,7 @@ class MvpMobileTest(unittest.TestCase):
         notifier.send_daily_report.return_value = SimpleNamespace(success=True, sent_parts=1)
         reports = {"daily": self.report, "market_data_count": 1}
         with patch("quant_assistant.__main__.cmd_daily", return_value=reports), \
+             patch("quant_assistant.v3.cloud_available", return_value=True), \
              patch("quant_assistant.v3.save_morning_advice") as save, \
              patch("quant_assistant.notifications.telegram.TelegramNotifier", return_value=notifier):
             cmd_notify_daily(Namespace(days=120))
@@ -129,6 +132,7 @@ class MvpMobileTest(unittest.TestCase):
 
         with patch("quant_assistant.__main__.cmd_daily",
                    return_value={"daily": self.report, "market_data_count": 1}), \
+             patch("quant_assistant.v3.cloud_available", return_value=True), \
              patch("quant_assistant.v3.save_morning_advice",
                    side_effect=RuntimeError("回读不一致")), \
              patch("quant_assistant.notifications.telegram.TelegramNotifier") as notifier:
@@ -154,6 +158,7 @@ class MvpMobileTest(unittest.TestCase):
         notifier.send_daily_report.return_value = SimpleNamespace(success=False, error="HTTP 502")
         with patch("quant_assistant.__main__.cmd_daily",
                    return_value={"daily": self.report, "market_data_count": 1}), \
+             patch("quant_assistant.v3.cloud_available", return_value=True), \
              patch("quant_assistant.v3.save_morning_advice"), \
              patch("quant_assistant.notifications.telegram.TelegramNotifier", return_value=notifier):
             with self.assertRaisesRegex(RuntimeError, "Telegram 推送失败: HTTP 502"):
