@@ -72,12 +72,21 @@ def save_morning_advice(reports: dict, now: dt.datetime | None = None,
     if summary["settled_count"]:
         stats = summary["overall"]
         value = stats["mean_return"]["10"]
-        line = (f"过去20日观察窗口已结算建议：目标先触及 {stats['target_first']}/{summary['settled_count']}，"
-                f"10日平均收益 {value:.2%}。")
+        mean = f"{value:.2%}" if value is not None else "样本不足"
+        line = (f"建议效果追踪：20日已结算 {summary['settled_count']}；"
+                f"目标先触及 {stats['target_first']} / 失效先触及 {stats['invalidation_first']}；"
+                f"10日平均收益 {mean}。")
+        if summary["insufficient_sample"]:
+            line += " 样本不足，不判断效果。"
     else:
         line = "建议效果追踪：尚无已结算20日样本。"
     with Path(reports["daily"]).open("a", encoding="utf-8") as handle:
         handle.write("\n" + line + "\n")
+    if reports.get("telegram"):
+        path = Path(reports["telegram"])
+        compact = path.read_text(encoding="utf-8")
+        compact = compact.replace("建议效果追踪：尚无已结算20日样本。", line)
+        path.write_text(compact, encoding="utf-8")
     return summary
 
 

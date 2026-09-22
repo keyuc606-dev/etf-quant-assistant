@@ -5,10 +5,12 @@
 import datetime
 from typing import Optional
 
+import pandas as pd
+
 from .portfolio.holdings import PortfolioManager
 from .portfolio.analyzer import PortfolioAnalyzer
 from .portfolio.risk_engine import RiskEngine
-from .data.fetcher import DataFetcher
+from .data.fetcher import DataFetcher, DataFetcher as MarketCalendar
 from .analysis.indicators import add_all_indicators
 from .models import RiskAlert
 
@@ -30,6 +32,12 @@ def run_daily_pipeline(pm: PortfolioManager, days: int = 120):
 
     for pos in pm.positions:
         df = fetcher.fetch_hist(pos.code, pos.market, days=days)
+        if df is not None and not df.empty:
+            # Never calculate morning indicators from a provisional current-day bar.
+            cutoff = MarketCalendar._last_completed_trading_day()
+            df = df.copy()
+            df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+            df = df[df["日期"].dt.date <= cutoff].copy()
         if df is not None and not df.empty:
             df = add_all_indicators(df)
             stock_data[pos.code] = df

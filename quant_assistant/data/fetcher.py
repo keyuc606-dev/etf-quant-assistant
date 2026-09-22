@@ -8,6 +8,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
@@ -723,6 +724,32 @@ class DataFetcher:
         })
         message = result.get("result", {})
         return {"message_id": message.get("message_id"), "ok": True}
+
+    def send_telegram_document(self, bot_token: str, chat_id: str, path: Path) -> dict:
+        """Send the private detail report to the same configured chat as an attachment."""
+        boundary = f"codex-{uuid.uuid4().hex}"
+        content = Path(path).read_bytes()
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"my-portfolio-detail.md\"\r\n"
+            "Content-Type: text/markdown; charset=utf-8\r\n\r\n"
+        ).encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode("ascii")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/sendDocument", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                     "User-Agent": "ETFQuantAssistant/1.0"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"Telegram 附件 HTTP {error.code}") from None
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Telegram 附件网络失败: {error.reason}") from None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("Telegram 附件响应无法解析") from None
+        if not result.get("ok"):
+            raise RuntimeError(f"Telegram 附件被拒绝: {result.get('description', '未知错误')}")
+        return {"message_id": result.get("result", {}).get("message_id"), "ok": True}
 
     def fetch_telegram_updates(self, bot_token: str, offset: int = 0,
                                limit: int = 100) -> list:

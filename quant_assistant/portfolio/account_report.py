@@ -7,13 +7,131 @@ from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
-from ..analysis.indicators import get_signals
+from ..analysis.indicators import add_all_indicators, get_signals
 from ..analysis.account_advice import build_rule_advices
 from ..analysis.discipline import build_discipline, cash_defense, short_note
 from ..config import ETF_POOL, REPORT_DIR
+from ..data.fetcher import CN_TZ, cached_trade_dates
 
 
 MAX_FOCUS_POSITIONS = 5
+
+
+def _completed_day(moment: datetime.datetime) -> datetime.date:
+    local = _china_time(moment)
+    day = local.date() if local.time() >= datetime.time(16) else local.date() - datetime.timedelta(days=1)
+    calendar = cached_trade_dates()
+    for _ in range(40):
+        is_session = day.isoformat() in calendar if calendar is not None else day.weekday() < 5
+        if is_session:
+            return day
+        day -= datetime.timedelta(days=1)
+    return day
+
+
+def _china_time(moment: datetime.datetime) -> datetime.datetime:
+    return moment.replace(tzinfo=CN_TZ) if moment.tzinfo is None else moment.astimezone(CN_TZ)
+
+
+def _integrity_text(views: List[dict], generated_at: datetime.datetime) -> str:
+    cutoff = _completed_day(generated_at).isoformat()
+    dates = [item["data_date"] for item in views]
+    if dates and all(date == cutoff for date in dates):
+        if any(item["indicators"].get("量比") == 0 for item in views):
+            return "降级：完整日K存在零成交量信号，需核验数据源"
+        return "已验证截至上一完整交易日"
+    return "降级：部分标的缺少上一完整交易日日K，相关判断需人工复核"
+
+
+def _advice_conflict(advice: dict, discipline: dict) -> bool:
+    if advice.get("action") != "ADD_SMALL":
+        return False
+    forbidden = discipline.get("forbidden_action", "")
+    return any(word in forbidden for word in ("摊平", "越跌越补", "禁止自动回补", "禁止情绪化追回"))
+
+
+def _compact_price(value) -> str:
+    if value is None:
+        return "-"
+    value = float(value)
+    digits = 2 if value >= 20 else 3 if value >= 1 else 4
+    return f"{value:.{digits}f}"
+
+
+def _compact_range(value) -> str:
+    return "-" if value is None else f"{_compact_price(value[0])}–{_compact_price(value[1])}"
+
+
+def _compact_discipline(discipline: dict) -> str:
+    state = discipline.get("discipline_state", "")
+    forbidden = discipline.get("forbidden_action", "")
+    if state == "冲高滞涨":
+        return "接近压力，分批锁利复核"
+    if "摊平" in forbidden or "越跌越补" in forbidden:
+        return "禁止摊平"
+    if "追回" in forbidden:
+        return "禁追高"
+    if not discipline.get("t_opportunity", "").startswith("具备"):
+        return "不做T"
+    return "人工复核T空间"
+
+
+def _render_telegram(pm, views: List[dict], news_result: dict,
+                     generated_at: datetime.datetime, advice_by_code: dict,
+                     disciplines: dict, degraded_sources: List[str]) -> str:
+    total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
+    pnl = pm.total_market_value - total_cost
+    cash_ratio = pm.cash / pm.total_assets if pm.total_assets else 0
+    risk = sorted(views, key=lambda item: (
+        -(30 if not item["available"] else 0)
+        -(20 if item["pnl_pct"] is not None and item["pnl_pct"] <= -.30 else 10 if item["pnl_pct"] is not None and item["pnl_pct"] <= -.15 else 0)
+        -(10 if item["atr_pct"] is not None and item["atr_pct"] >= .03 else 0)
+        -(5 if _asset_type(item["position"]) == "STOCK" else 0), item["position"].code))[:3]
+    selected = {item["position"].code for item in risk}
+    weight = sorted((item for item in views if item["position"].code not in selected),
+                    key=lambda item: (-item["weight"], item["position"].code))[:2]
+    if len(risk) + len(weight) < 3:
+        weight = sorted((item for item in views if item["position"].code not in selected),
+                        key=lambda item: (-item["weight"], item["position"].code))[:3-len(risk)]
+    max_item = max(views, key=lambda item: item["weight"], default=None)
+    high_losses = sum(item["pnl_pct"] is not None and item["pnl_pct"] <= -.15 for item in views)
+    overlap = _overlap_groups(views)
+    status = "偏低" if cash_ratio < .15 else "中性偏低" if cash_ratio < .25 else "充足"
+    lines = ["股票 + ETF 账户晨报", f"报告日期：{_china_time(generated_at).date().isoformat()}",
+             f"总资产 ￥{pm.total_assets:,.0f}｜现金 {cash_ratio:.1%}｜浮盈亏 {_money_signed(pnl)}",
+             f"持仓 {len(views)} 只｜风险 {_risk_level(views)}",
+             f"技术行情截止：{_market_as_of(views)} 收盘｜新闻截止：{_news_as_of(news_result)}",
+             f"技术指标数据完整性：{_integrity_text(views, generated_at)}"]
+    if degraded_sources:
+        lines.append(f"行情源 warning/degraded：备用源接管 {len(degraded_sources)} 只")
+    if news_result.get("degraded"):
+        lines.append("新闻不完整；综合置信度已降级")
+
+    def add_items(title, items):
+        if not items:
+            return
+        lines.append(title)
+        for item in items:
+            pos = item["position"]
+            advice = advice_by_code[pos.code]
+            conflict = advice["display_conflict"]
+            label = "冲突，人工复核" if conflict else advice["action_label"]
+            discipline = "冲突，人工复核" if conflict else _compact_discipline(disciplines[pos.code])
+            lines.append(f"{pos.name}({pos.code})｜{label}｜{discipline}｜置信{advice['confidence']}")
+            lines.append(f"  买 {_compact_range(advice['buy_range'])}｜减 {_compact_range(advice['reduce_range'])}｜失效 {_compact_price(advice['stop'])}")
+            if conflict:
+                lines.append("  理由：建议与纪律冲突，暂停执行暗示")
+            elif advice.get("reasons"):
+                lines.append(f"  理由：{advice['reasons'][0]}")
+
+    add_items("风险重点", risk)
+    add_items("仓位重点", weight)
+    lines.extend(["风险摘要", f"最大单项：{max_item['position'].name} {max_item['weight']:.1%}" if max_item else "最大单项：无",
+                  f"主题重叠：{len(overlap)} 组｜高亏损持仓：{high_losses} 只｜现金：{status}",
+                  "建议效果追踪：尚无已结算20日样本。",
+                  "原量化策略基准：独立保留，不改写真实账户建议。",
+                  "详细新闻、信号、纪律和全部持仓见详细报告。"])
+    return "\n".join(lines) + "\n"
 
 
 def _plain_signal(signal: str) -> str:
@@ -90,11 +208,26 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
                              theme_observations: Optional[Dict[str, dict]] = None,
                              report_dir: Optional[Path] = None,
                              generated_at: Optional[datetime.datetime] = None,
-                             advice_provider=None, executions=None) -> dict:
+                             advice_provider=None, executions=None,
+                             degraded_sources: Optional[List[str]] = None) -> dict:
     report_dir = Path(report_dir) if report_dir is not None else REPORT_DIR
     report_dir.mkdir(parents=True, exist_ok=True)
     stock_data = stock_data or {}
-    generated_at = generated_at or datetime.datetime.now()
+    generated_at = generated_at or datetime.datetime.now(CN_TZ)
+    cutoff = _completed_day(generated_at)
+    complete_data = {}
+    for code, frame in stock_data.items():
+        if frame is None or frame.empty:
+            continue
+        dates = pd.to_datetime(frame["日期"], errors="coerce")
+        complete = frame.loc[dates.dt.date <= cutoff].copy()
+        if not complete.empty:
+            if len(complete) != len(frame):
+                if {"收盘", "最高", "最低", "成交量"}.issubset(complete.columns):
+                    complete = add_all_indicators(complete)
+                pm.update_price(code, float(complete.iloc[-1]["收盘"]))
+            complete_data[code] = complete
+    stock_data = complete_data
     news_result = news_result or _empty_news_result()
     theme_observations = theme_observations or {}
     views = _position_views(pm, stock_data, theme_observations)
@@ -102,12 +235,37 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     advice_mode = "纯规则"
     if advice_provider is not None:
         advices, advice_mode = advice_provider.enhance(advices)
+    degraded_sources = degraded_sources or []
+    for advice in advices:
+        view = next(item for item in views if item["position"].code == advice["code"])
+        issues = []
+        statuses = news_result.get("source_status") or {}
+        if (news_result.get("degraded") or news_result.get("is_stale")
+                or any(status not in ("ok", "success") for status in statuses.values())):
+            issues.append("新闻不完整")
+        if advice["code"] in degraded_sources:
+            issues.append("主行情源降级")
+        if view["data_date"] != cutoff.isoformat():
+            issues.append("行情未覆盖上一完整交易日")
+        if any(view["indicators"].get(key) is None for key in ("MA20", "ATR", "量比")):
+            issues.append("关键指标缺失")
+        frame = stock_data.get(advice["code"])
+        if frame is not None and "成交量" in frame and pd.to_numeric(frame.iloc[-1]["成交量"], errors="coerce") <= 0:
+            issues.append("成交量异常")
+        if issues:
+            advice["confidence"] = "低" if len(issues) > 1 or not view["available"] or view["data_date"] != cutoff.isoformat() else "中"
+        advice["confidence_note"] = "、".join(issues) if issues else "完整日K与关键指标可用"
     advice_by_code = {item["code"]: item for item in advices}
     cash_note = cash_defense(pm, views)
     disciplines = {view["position"].code: build_discipline(
         view, stock_data.get(view["position"].code),
         advice_by_code[view["position"].code], cash_note, executions,
         generated_at) for view in views}
+    for advice in advices:
+        advice["display_conflict"] = _advice_conflict(advice, disciplines[advice["code"]])
+        if advice["display_conflict"]:
+            advice["confidence"] = "低"
+            advice["confidence_note"] += "、建议与纪律冲突"
     focus = select_focus_positions(views)
     advice_order = {item["code"]: index for index, item in enumerate(advices)}
     focus.sort(key=lambda item: advice_order.get(item["position"].code, len(advices)))
@@ -115,13 +273,18 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
                           advice_by_code, advice_mode, disciplines)
     detail = _render_detail(
         pm, views, alerts or [], fetch_errors or [], news_result, generated_at,
-        advice_by_code, advice_mode, disciplines,
+        advice_by_code, advice_mode, disciplines, degraded_sources,
     )
+    telegram = _render_telegram(pm, views, news_result, generated_at,
+                                advice_by_code, disciplines, degraded_sources)
     daily_path = report_dir / "my-portfolio-daily.md"
     detail_path = report_dir / "my-portfolio-detail.md"
+    telegram_path = report_dir / "my-portfolio-telegram.txt"
     daily_path.write_text(daily, encoding="utf-8")
     detail_path.write_text(detail, encoding="utf-8")
+    telegram_path.write_text(telegram, encoding="utf-8")
     return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus),
+            "telegram": telegram_path,
             "advices": advices, "views": views, "stock_data": stock_data,
             "advice_mode": advice_mode, "disciplines": disciplines}
 
@@ -163,8 +326,9 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
     lines = [
         "# 股票 + ETF 账户日报",
         "",
-        f"日期：{generated_at.date().isoformat()}",
-        f"行情截止：{_market_as_of(views)}",
+        f"报告日期：{_china_time(generated_at).date().isoformat()}",
+        f"技术行情截止：{_market_as_of(views)} 收盘",
+        f"技术指标数据完整性：{_integrity_text(views, generated_at)}",
         f"新闻截止：{_news_as_of(news_result)}",
         "计划口径：前一交易日收盘 + 隔夜新闻的当天作战计划（非实时盘中建议）",
         f"分析模式：{advice_mode}",
@@ -199,7 +363,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
             f"- 状态：{_state_summary(item)}",
             f"- 近期事件：{_recent_event_text(item['theme_observation'])}",
             f"- 主题状态：{item['theme_observation'].get('status', '近期公开信息不足，暂不形成行业判断。')}",
-            f"- 操作倾向：{advice['action_label']}；建议仓位变化：{advice['position_change']}；置信度：{advice['confidence']}",
+            f"- 操作倾向：{'冲突，人工复核' if advice['display_conflict'] else advice['action_label']}；建议仓位变化：{'暂停展示' if advice['display_conflict'] else advice['position_change']}；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
             f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
             f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
             f"- 交易纪律：{short_note(disciplines[pos.code])}",
@@ -264,7 +428,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         "",
         "## 数据时间",
         "",
-        f"- 行情截止：{_market_as_of(views)}",
+        f"- 技术行情截止：{_market_as_of(views)} 收盘",
         f"- 新闻截止：{_news_as_of(news_result)}",
         "",
         "详细数据见 `my-portfolio-detail.md`。",
@@ -275,7 +439,8 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
 
 def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
                    news_result: dict, generated_at: datetime.datetime,
-                   advice_by_code: dict, advice_mode: str, disciplines: dict) -> str:
+                   advice_by_code: dict, advice_mode: str, disciplines: dict,
+                   degraded_sources: List[str]) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     cash_ratio = pm.cash / pm.total_assets if pm.total_assets > 0 else 0.0
@@ -283,7 +448,8 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         "# 股票 + ETF 账户详细报告",
         "",
         f"生成日期：{generated_at.isoformat(timespec='minutes')}",
-        f"行情截止：{_market_as_of(views)}",
+        f"技术行情截止：{_market_as_of(views)} 收盘",
+        f"技术指标数据完整性：{_integrity_text(views, generated_at)}",
         f"新闻截止：{_news_as_of(news_result)}",
         "计划口径：前一交易日收盘 + 隔夜新闻的当天作战计划（非实时盘中建议）",
         f"分析模式：{advice_mode}",
@@ -319,9 +485,9 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
     for item in views:
         advice = advice_by_code[item["position"].code]
         lines.append(
-            f"| {advice['code']} | {advice['action_label']} | {_price_range(advice['buy_range'])} | "
+            f"| {advice['code']} | {'冲突，人工复核' if advice['display_conflict'] else advice['action_label']} | {_price_range(advice['buy_range'])} | "
             f"{_price_range(advice['reduce_range'])} | {_price(advice['stop'])} | {_price(advice['target'])} | "
-            f"{advice['position_change']} | {advice['confidence']} | "
+            f"{'暂停展示' if advice['display_conflict'] else advice['position_change']} | {advice['confidence']}（{advice['confidence_note']}） | "
             f"{advice['ai_note'] or '；'.join(advice['reasons'])} |"
         )
     lines.extend(["", "## 交易纪律实验标签（discipline-v1）", "",
@@ -431,6 +597,7 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         "",
         "- 行情由项目现有 AkShare 数据层获取：A股和ETF均以东方财富为主源，ETF另有新浪免费备用源。",
         f"- 本次不可用项目：{', '.join(fetch_errors) if fetch_errors else '无'}。",
+        f"- 主源失败、备用源接管（warning/degraded）：{', '.join(degraded_sources) if degraded_sources else '无'}。",
         "- 不可用行情不会用成本价或虚构价格补齐，也不会参与价格类盈亏判断。",
         "- 新闻按自然时间记录，可能晚于行情截止并包含周末；不会回填成交易日信号，也不会改变规则交易清单。",
         "",

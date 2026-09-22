@@ -141,6 +141,7 @@ def cmd_daily(args):
         theme_observations=theme_observations,
         advice_provider=OpenAIAdviceProvider(result["fetcher"]),
         executions=(trading.repository.list_executions() if trading.is_initialized() else None),
+        degraded_sources=degraded_sources,
     )
     print(f"  账户日报: {reports['daily']}")
     print(f"  详细报告: {reports['detail']}")
@@ -170,7 +171,9 @@ def cmd_notify_daily(args):
         raise RuntimeError(f"建议/状态持久化失败，Telegram 未发送: {error}") from error
 
     print("  Telegram：开始发送日报")
-    result = TelegramNotifier().send_daily_report(reports["daily"])
+    detail_option = {"detail_path": reports["detail"]} if reports.get("detail") else {}
+    result = TelegramNotifier().send_daily_report(
+        reports.get("telegram", reports["daily"]), **detail_option)
     if not result.success:
         raise RuntimeError(
             f"日报已正常生成，但 Telegram 推送失败: {result.error}"

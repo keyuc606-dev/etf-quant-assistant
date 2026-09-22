@@ -78,4 +78,5 @@ jobs:
           rm -f data/portfolio.json data/portfolio.json.bak data/portfolio.json.tmp
           rm -f data/trading.sqlite3 data/trading.sqlite3-shm data/trading.sqlite3-wal
           rm -f data/reports/my-portfolio-daily.md data/reports/my-portfolio-detail.md
+          rm -f data/reports/my-portfolio-telegram.txt
           rm -f data/reports/my-portfolio-intraday.md

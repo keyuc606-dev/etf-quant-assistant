@@ -73,7 +73,8 @@ class TelegramNotifier:
         self.chat_id = chat_id if chat_id is not None else os.getenv("TELEGRAM_CHAT_ID", "")
         self.fetcher = fetcher or DataFetcher()
 
-    def send_daily_report(self, report_path: Path) -> NotificationResult:
+    def send_daily_report(self, report_path: Path,
+                          detail_path: Optional[Path] = None) -> NotificationResult:
         if not self.bot_token or not self.chat_id:
             return NotificationResult(False, error="缺少 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID")
         if not re.fullmatch(r"-?\d{1,20}", self.chat_id):
@@ -87,6 +88,9 @@ class TelegramNotifier:
             sent = 0
             for part in parts:
                 self.fetcher.send_telegram_message(self.bot_token, self.chat_id, part)
+                sent += 1
+            if detail_path is not None:
+                self.fetcher.send_telegram_document(self.bot_token, self.chat_id, detail_path)
                 sent += 1
             return NotificationResult(True, sent_parts=sent)
         except Exception as error:
