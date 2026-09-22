@@ -1,6 +1,7 @@
 """Cloud orchestration for morning advice and provisional afternoon checks."""
 
 import datetime as dt
+import math
 import os
 from pathlib import Path
 
@@ -94,42 +95,114 @@ def _zone(value, zone) -> bool:
     return bool(zone and zone[0] <= value <= zone[1])
 
 
+def _positive(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_progress(stamp):
+    """A-share continuous auction minutes elapsed, excluding lunch."""
+    try:
+        parsed = dt.datetime.fromisoformat(str(stamp))
+        if parsed.tzinfo is None:
+            return None
+        time = parsed.astimezone(CN_TZ).time()
+    except (TypeError, ValueError):
+        return None
+    minutes = time.hour * 60 + time.minute
+    if minutes < 570 or minutes > 900:
+        return None
+    elapsed = min(max(minutes - 570, 0), 120) + min(max(minutes - 780, 0), 120)
+    return elapsed / 240 if elapsed > 0 else None
+
+
+def _volume_note(quote, avg_volume):
+    volume = _positive(quote.get("volume"))
+    baseline = _positive(avg_volume)
+    progress = _market_progress(quote.get("as_of"))
+    if not volume or not baseline or progress is None or progress < .15:
+        return "成交量判断不可用"
+    # At 14:45 the full-day comparison avoids amplifying the closing auction.
+    ratio = volume / baseline if progress >= .9375 else volume / (baseline * progress)
+    return "成交量异常" if ratio >= 1.8 or ratio <= .35 else "成交量正常"
+
+
+def _distance(price, level):
+    return abs(price - level) / level * 100
+
+
+def _price_text(value):
+    return f"{value:.3f}" if value < 10 else f"{value:.2f}"
+
+
 def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = None) -> dict:
     price = quote["price"]
     flags = []
+    opened, previous = _positive(quote.get("open")), _positive(quote.get("previous_close"))
+    if opened and previous:
+        gap = (opened / previous - 1) * 100
+        if abs(gap) >= 3:
+            flags.append(f"向{'上' if gap > 0 else '下'}跳空{abs(gap):.1f}%")
+    volume_note = _volume_note(quote, avg_volume)
+    if volume_note == "成交量异常":
+        flags.append(volume_note)
     if advice is None:
         if abs(quote.get("change_pct") or 0) >= 5:
             flags.append("异常波动")
-        if quote.get("open", 0) > 0 and quote.get("previous_close", 0) > 0:
-            if abs(quote["open"] / quote["previous_close"] - 1) >= .03:
-                flags.append("大幅跳空")
-        return {"status": "持仓风险快照", "flags": flags, "rule": "无09:20建议，仅检查盘中风险"}
-    stop, target = advice.get("invalidation_price"), advice.get("target_price")
-    if stop is not None and price <= stop:
-        status, rule = "失效", f"已跌破失效位 {stop:.3f}，停止按早间买入计划执行"
-    elif target is not None and price >= target:
-        status, rule = "目标已达", f"已达目标位 {target:.3f}，复核减仓纪律"
-    elif _zone(price, advice.get("reduce_zone")):
-        status, rule = "接近减仓区", "已进入早间减仓区，人工复核"
-    elif quote.get("change_pct", 0) >= 5:
-        status, rule = "今日不追高", "日内涨幅较大，暂停追价"
-    elif _zone(price, advice.get("buy_zone")):
-        status, rule = "进入买入区", "已进入早间买入区，仍需人工核对风险"
+        return {"status": "持仓风险快照", "flags": flags, "rule": "无09:20建议",
+                "priority": 90, "distance": "关键区间不可用", "distance_atr": math.inf,
+                "group": "暂不动作", "volume_note": volume_note}
+    stop, target = _positive(advice.get("invalidation_price")), _positive(advice.get("target_price"))
+    buy, reduce = advice.get("buy_zone"), advice.get("reduce_zone")
+    atr = _positive((advice.get("technical_features") or {}).get("ATR"))
+    levels = []
+    for label, zone in (("买入区", buy), ("减仓区", reduce)):
+        if zone and len(zone) == 2 and _positive(zone[0]) and _positive(zone[1]):
+            boundary = zone[0] if price < zone[0] else zone[1] if price > zone[1] else price
+            levels.append((abs(price - boundary), label, boundary))
+    if stop:
+        levels.append((abs(price - stop), "失效位", stop))
+    if target:
+        levels.append((abs(price - target), "目标位", target))
+    nearest = min(levels, default=None)
+    distance = (f"距{nearest[1]}{_distance(price, nearest[2]):.2f}%"
+                if nearest else "关键区间不可用")
+    normalized = nearest[0] / atr if nearest and atr else math.inf
+    near = lambda level: bool(atr and abs(price - level) <= .35 * atr)
+    if stop and price <= stop:
+        status, rule, priority, group = "已失效", "停止按早间买入计划执行", 0, "接近失效/高风险"
+    elif stop and price > stop and near(stop):
+        status, rule, priority, group = "接近失效位", "人工复核风险", 1, "接近失效/高风险"
+    elif target and price >= target:
+        status, rule, priority, group = "目标已达", "人工复核减仓纪律", 2, "最接近触发"
+    elif _zone(price, reduce):
+        status, rule, priority, group = "已进入减仓区", "人工复核分批处理", 3, "最接近触发"
+    elif _zone(price, buy):
+        status, rule, priority, group = "已进入买入区", "仅人工核对风险", 4, "最接近触发"
+    elif buy and price < buy[0]:
+        status, rule, priority, group = "跌破买入区但未失效", "勿将跌破视为买入触发", 5, "接近失效/高风险"
+    elif reduce and price < reduce[0] and near(reduce[0]):
+        status, rule, priority, group = "接近减仓区", "进入减仓区后人工分批处理", 6, "最接近触发"
+    elif buy and price > buy[1] and near(buy[1]):
+        status, rule, priority, group = "接近买入区", "仅人工观察", 7, "最接近触发"
+    elif reduce and price > reduce[1]:
+        status, rule, priority, group = "已超过减仓区", "人工复核减仓纪律", 8, "最接近触发"
     else:
-        status, rule = "等待", "未触发早间价位"
+        status, rule, priority, group = "暂不动作", "未触发早间价位", 90, "暂不动作"
     if abs(quote.get("change_pct") or 0) >= 5:
         flags.append("异常波动")
-    if quote.get("open", 0) > 0 and quote.get("previous_close", 0) > 0:
-        if abs(quote["open"] / quote["previous_close"] - 1) >= .03:
-            flags.append("大幅跳空")
-    if avg_volume and quote.get("volume", 0) > avg_volume * 1.8:
-        flags.append("成交量异常")
-    return {"status": status, "flags": flags, "rule": rule}
+    return {"status": status, "flags": flags, "rule": rule, "priority": priority,
+            "distance": distance, "distance_atr": normalized, "group": group,
+            "volume_note": volume_note}
 
 
 def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                    quality: dict | None = None,
-                   executions: list[dict] | None = None) -> str:
+                   executions: list[dict] | None = None,
+                   detail: list[str] | None = None) -> str:
     day = now.astimezone(CN_TZ).date().isoformat()
     morning = {r["code"]: r for r in records if r["as_of"] == day}
     rows = []
@@ -141,38 +214,72 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             continue
         advice = morning.get(pos.code)
         verdict = classify_quote(advice, quote, advice.get("reference_volume") if advice else None)
-        priority = {"失效": 0, "目标已达": 1, "接近减仓区": 2,
-                    "进入买入区": 3, "今日不追高": 4, "持仓风险快照": 5, "等待": 6}
-        rows.append((priority[verdict["status"]], pos.code, pos, quote, advice, verdict))
-    rows.sort(key=lambda item: (item[0], item[1]))
+        rows.append((verdict["priority"], verdict["distance_atr"], pos.code,
+                     pos, quote, advice, verdict))
+    rows.sort(key=lambda item: (item[0], item[1], item[2]))
     if quality is not None:
         quality.update({"morning_advice": bool(morning), "fresh_provisional": bool(rows),
                         "degraded": bool(degraded)})
     lines = [f"14:30 盘中风险/执行检查｜{day} 北京时间", "盘中数据均为 provisional，仅供人工复核；不生成正式交易清单。"]
     if not morning:
         lines.append("今日09:20建议不存在，以下仅为持仓盘中风险快照。")
-    for _, _, pos, quote, advice, verdict in rows[:5]:
-        buy = advice.get("buy_zone") if advice else None
-        reduce = advice.get("reduce_zone") if advice else None
-        zone = (f"买入区 {buy[0]:.3f}–{buy[1]:.3f}；减仓区 {reduce[0]:.3f}–{reduce[1]:.3f}"
-                if buy and reduce else "早间区间不可用")
-        lines.append(f"{pos.name} {pos.code}｜{quote['price']:.3f} ({quote['change_pct']:+.2f}%)｜{verdict['status']}")
-        lines.append(f"  成交量 {quote['volume']:,.0f} 手；成交额 ￥{quote['amount']:,.0f}；报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '数据源未知')}）")
-        lines.append(f"  {zone}；{verdict['rule']}。" + ("；" + "、".join(verdict["flags"]) if verdict["flags"] else ""))
-        discipline = advice.get("discipline") if advice else None
-        if discipline:
-            if verdict["status"] == "失效":
-                reminder = "趋势/失效位破坏，禁止继续摊平；人工复核风险。"
-            elif sale_chase_alert(pos.code, executions, now, quote["price"],
-                                  (advice.get("technical_features") or {}).get("ATR")):
-                reminder = "近期卖出后继续上涨，禁止情绪化追回；仅回踩早间规则买入区并重新企稳后人工评估。"
-            elif executions is None and discipline.get("discipline_state") == "卖飞/减仓后续涨":
+    focus_count = min(5, max(3, sum(row[0] < 90 for row in rows)))
+    for group in ("接近失效/高风险", "最接近触发", "暂不动作"):
+        selected = [row for row in rows[:focus_count] if row[-1]["group"] == group]
+        if not selected:
+            continue
+        lines.append(f"【{group}】")
+        for _, _, _, pos, quote, advice, verdict in selected:
+            buy = advice.get("buy_zone") if advice else None
+            reduce = advice.get("reduce_zone") if advice else None
+            stop = _positive(advice.get("invalidation_price")) if advice else None
+            zone = (f"买{_price_text(buy[0])}–{_price_text(buy[1])}｜"
+                    f"减{_price_text(reduce[0])}–{_price_text(reduce[1])}｜失效{_price_text(stop)}"
+                    if buy and reduce and stop else "早间关键区间不完整")
+            discipline = advice.get("discipline") if advice else None
+            forbidden = (discipline or {}).get("forbidden_action", "")
+            conflict = verdict["status"] in ("已进入买入区", "接近买入区") and any(
+                word in forbidden for word in ("禁止越跌越补", "禁止补仓", "禁止加仓", "禁止情绪化追回"))
+            if conflict:
+                reminder = "冲突，人工复核"
+            elif verdict["status"] == "已失效":
+                reminder = "停止早间买入计划，人工复核风险"
+            elif discipline and sale_chase_alert(pos.code, executions, now, quote["price"],
+                    (advice.get("technical_features") or {}).get("ATR")):
+                reminder = "卖出后禁止情绪化追回"
+            elif executions is None and (discipline or {}).get("discipline_state") == "卖飞/减仓后续涨":
                 reminder = short_note(discipline)
             else:
-                atr = (advice.get("technical_features") or {}).get("ATR")
-                reminder = t_opportunity({"buy_range": buy, "reduce_range": reduce,
-                                          "asset_type": advice.get("asset_type")}, atr, quote)
-            lines.append(f"  交易纪律：{reminder}（provisional，仅供人工复核）")
+                reminder = verdict["rule"]
+            change = quote.get("change_pct") or 0
+            lines.append(f"{pos.name} {pos.code}｜{_price_text(quote['price'])} {change:+.2f}%｜{verdict['status']}")
+            lines.append(zone)
+            gaps = [flag for flag in verdict["flags"] if "跳空" in flag]
+            lines.append(f"{verdict['distance']}｜纪律：{reminder}" +
+                         ("｜" + "、".join(gaps) if gaps else ""))
+            if detail is not None:
+                atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
+                t_note = (t_opportunity({"buy_range": buy, "reduce_range": reduce,
+                                         "asset_type": advice.get("asset_type")}, atr, quote)
+                          if advice else "不建议做T：无早间建议")
+                detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '未知源')}）；"
+                              f"成交量 {quote.get('volume', 0):,.0f} 手；成交额 ￥{quote.get('amount', 0):,.0f}\n"
+                              f"{zone}；{verdict['distance']}；{verdict['volume_note']}；{t_note}；"
+                              f"{', '.join(verdict['flags']) or '无额外风险标记'}。")
+    if len(rows) > focus_count:
+        others = rows[focus_count:]
+        lines.append("其余：" + "；".join(f"{pos.name}{pos.code} {verdict['status']}" for _, _, _, pos, _, _, verdict in others))
+        if detail is not None:
+            for _, _, _, pos, quote, advice, verdict in others:
+                atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
+                t_note = (t_opportunity({"buy_range": advice.get("buy_zone"),
+                                         "reduce_range": advice.get("reduce_zone"),
+                                         "asset_type": advice.get("asset_type")}, atr, quote)
+                          if advice else "不建议做T：无早间建议")
+                detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}"
+                              f"（{quote.get('source', '未知源')}）；成交量 {quote.get('volume', 0):,.0f} 手；"
+                              f"成交额 ￥{quote.get('amount', 0):,.0f}\n{verdict['status']}；"
+                              f"{verdict['distance']}；{verdict['volume_note']}；{t_note}。")
     if degraded:
         lines.append("实时数据不可用，已降级；未用昨收冒充盘中价：" + "；".join(degraded))
     if not rows:
@@ -189,16 +296,20 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     state, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     fetcher = fetcher or DataFetcher()
     quality = {}
+    detail = []
     text = build_intraday(PortfolioManager(), state.get("advice_records", []), fetcher,
                           now, quality,
-                          TradingService().repository.list_executions())
+                          TradingService().repository.list_executions(), detail)
     print("盘中数据校验：当日建议={morning_advice}；新鲜provisional报价={fresh_provisional}；存在降级={degraded}".format(**quality))
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "my-portfolio-intraday.md"
     path.write_text(text + "\n", encoding="utf-8")
+    detail_path = REPORT_DIR / "my-portfolio-intraday-detail.md"
+    detail_path.write_text("# 盘中详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(text):
         fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
+    fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
     return path

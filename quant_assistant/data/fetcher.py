@@ -485,6 +485,8 @@ class DataFetcher:
             "volume": _safe_float(row.get("成交量")),
             "amount": _safe_float(row.get("成交额")),
             "open": _safe_float(row.get("开盘价")),
+            "high": _safe_float(row.get("最高价")),
+            "low": _safe_float(row.get("最低价")),
             "previous_close": _safe_float(row.get("昨收")),
             "quote_updated_at": row.get("更新时间"),
         }
@@ -537,9 +539,13 @@ class DataFetcher:
             if (stamp.date() != now.date() or abs((now - stamp).total_seconds()) > 900
                     or price <= 0 or previous <= 0 or volume <= 0):
                 return None
+            opened = _safe_float(fields[1])
+            high, low = _safe_float(fields[4]), _safe_float(fields[5])
+            valid_range = opened > 0 and low > 0 and low <= min(opened, price) <= high and high >= max(opened, price)
             return {"code": code, "name": fields[0], "price": price,
                     "change_pct": (price / previous - 1) * 100, "volume": volume / 100,
-                    "amount": amount, "open": float(fields[1]), "previous_close": previous,
+                    "amount": amount, "open": opened, "previous_close": previous,
+                    "high": high if valid_range else None, "low": low if valid_range else None,
                     "source": "sina", "as_of": stamp.isoformat(),
                     "provisional": True}
         except (IndexError, ValueError, OSError, urllib.error.URLError):
@@ -562,9 +568,12 @@ class DataFetcher:
             if (stamp.date() != now.date() or abs((now - stamp).total_seconds()) > 900
                     or price <= 0 or previous <= 0 or volume <= 0):
                 return None
+            high, low = _safe_float(fields[33]), _safe_float(fields[34])
+            valid_range = opened > 0 and low > 0 and low <= min(opened, price) <= high and high >= max(opened, price)
             return {"code": code, "name": fields[1], "price": price,
                     "change_pct": (price / previous - 1) * 100, "volume": volume,
                     "amount": amount, "open": opened, "previous_close": previous,
+                    "high": high if valid_range else None, "low": low if valid_range else None,
                     "source": "tencent", "as_of": stamp.isoformat(), "provisional": True}
         except (IndexError, ValueError, OSError, urllib.error.URLError):
             return None

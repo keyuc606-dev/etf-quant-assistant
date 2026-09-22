@@ -124,7 +124,7 @@ def test_intraday_success_and_missing_quote_never_uses_previous_close():
                                                   "provisional": True}
     now = dt.datetime(2026, 9, 17, 14, 30, tzinfo=CN_TZ)
     text = build_intraday(pm, [advice], fetcher, now)
-    assert "进入买入区" in text and "97.000" in text
+    assert "已进入买入区" in text and "97.00" in text
     fetcher.fetch_intraday_quote.return_value = None
     missing = build_intraday(pm, [advice], fetcher, now)
     assert "实时数据不可用" in missing and "100.000" not in missing
@@ -169,14 +169,15 @@ def test_gap_and_volume_flags():
     quote = {"price": 97, "change_pct": -2, "open": 96,
              "previous_close": 100, "volume": 200}
     result = classify_quote(record(), quote, avg_volume=100)
-    assert result["status"] == "进入买入区"
-    assert result["flags"] == ["大幅跳空", "成交量异常"]
+    assert result["status"] == "已进入买入区"
+    assert result["flags"] == ["向下跳空4.0%"]
+    assert result["volume_note"] == "成交量判断不可用"
 
 
 @pytest.mark.parametrize("price, expected", [
-    (97, "进入买入区"),
-    (107, "接近减仓区"),
-    (90, "失效"),
+    (97, "已进入买入区"),
+    (107, "已进入减仓区"),
+    (90, "已失效"),
     (110, "目标已达"),
 ])
 def test_intraday_status_uses_morning_advice_levels(price, expected):
@@ -196,10 +197,10 @@ def test_intraday_report_uses_only_todays_advice():
     now = dt.datetime(2026, 9, 17, 14, 30, tzinfo=CN_TZ)
     yesterday = {**record(), "as_of": "2026-09-16"}
     today = {**record(), "as_of": "2026-09-17"}
-    assert "进入买入区" in build_intraday(Mock(positions=[position]), [yesterday, today], fetcher, now)
+    assert "已进入买入区" in build_intraday(Mock(positions=[position]), [yesterday, today], fetcher, now)
     stale = build_intraday(Mock(positions=[position]), [yesterday], fetcher, now)
     assert "仅为持仓盘中风险快照" in stale
-    assert "进入买入区" not in stale
+    assert "已进入买入区" not in stale
 
 
 def test_tencent_fallback_requires_fresh_timestamp():

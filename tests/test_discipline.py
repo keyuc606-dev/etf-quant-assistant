@@ -65,8 +65,10 @@ def test_profit_stall_and_t_space():
     hot = frame(price=110, ma20=105, ma5=111, macd=1, rsi=75)
     assert verdict(hot, price=110, cost=90)["discipline_state"] == "冲高滞涨"
     assert "不建议做T" in t_opportunity(ADVICE, 2)
-    narrow = {"price": 100, "high": 101, "low": 99, "provisional": True}
-    wide = {"price": 100, "high": 108, "low": 96, "provisional": True}
+    narrow = {"price": 100, "high": 101, "low": 99, "open": 100,
+              "previous_close": 99, "provisional": True}
+    wide = {"price": 100, "high": 108, "low": 96, "open": 100,
+            "previous_close": 99, "provisional": True}
     assert "无T空间" in t_opportunity(ADVICE, 2, narrow)
     assert "具备T机会" in t_opportunity(ADVICE, 2, wide)
 
@@ -98,5 +100,5 @@ def test_intraday_displays_discipline_and_no_stale_price():
             return quote
     text = build_intraday(SimpleNamespace(positions=[POS]), [advice], Fetcher(),
                           dt.datetime(2026, 9, 21, 14, 30, tzinfo=CN_TZ))
-    assert "卖飞后禁止追回" in text
+    assert "冲突，人工复核" in text
     assert "provisional" in text

@@ -30,8 +30,10 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
         frame = reports.get("stock_data", {}).get(pos.code)
         volume = None
         if frame is not None and not frame.empty and "成交量" in frame:
-            value = pd.to_numeric(frame.iloc[-1]["成交量"], errors="coerce")
-            volume = float(value) if pd.notna(value) else None
+            sample = pd.to_numeric(frame["成交量"].tail(20), errors="coerce")
+            sample = sample[sample > 0].dropna()
+            # A single prior session is too noisy to call today's volume abnormal.
+            volume = float(sample.mean()) if len(sample) >= 5 else None
         identity = f"{as_of}:{pos.code}:{RULE_VERSION}"
         records.append({
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],

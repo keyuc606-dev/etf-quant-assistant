@@ -66,9 +66,12 @@ def t_opportunity(advice, atr, quote=None):
     """Only fresh intraday high/low can establish a provisional T opportunity."""
     if not quote or not quote.get("provisional"):
         return "不建议做T：缺少可信日内高低点，无法判断空间"
-    price, high, low = (_number(quote.get(k)) for k in ("price", "high", "low"))
+    price, high, low, opened, previous = (_number(quote.get(k)) for k in
+                                          ("price", "high", "low", "open", "previous_close"))
     buy, reduce = advice.get("buy_range"), advice.get("reduce_range")
-    if not all((price, high, low, atr, buy, reduce)) or low <= 0 or high < low:
+    if (not all((price, high, low, opened, previous, atr, buy, reduce))
+            or low <= 0 or high < max(price, opened) or low > min(price, opened)
+            or buy[1] >= reduce[0]):
         return "不建议做T：日内区间或支撑压力不完整"
     # A round trip estimate includes commissions, sale tax where applicable and slip.
     round_trip = 0.0035 if advice.get("asset_type") == "STOCK" else 0.0025
