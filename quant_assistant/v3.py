@@ -183,11 +183,11 @@ def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = 
     elif _zone(price, buy):
         status, rule, priority, group = "已进入买入区", "仅人工核对风险", 4, "最接近触发"
     elif buy and price < buy[0]:
-        status, rule, priority, group = "跌破买入区但未失效", "勿将跌破视为买入触发", 5, "接近失效/高风险"
+        status, rule, priority, group = "跌破买入区但未失效", "勿将跌破视为买入触发", 7, "接近失效/高风险"
     elif reduce and price < reduce[0] and near(reduce[0]):
-        status, rule, priority, group = "接近减仓区", "进入减仓区后人工分批处理", 6, "最接近触发"
+        status, rule, priority, group = "接近减仓区", "进入减仓区后人工分批处理", 5, "最接近触发"
     elif buy and price > buy[1] and near(buy[1]):
-        status, rule, priority, group = "接近买入区", "仅人工观察", 7, "最接近触发"
+        status, rule, priority, group = "接近买入区", "仅人工观察", 6, "最接近触发"
     elif reduce and price > reduce[1]:
         status, rule, priority, group = "已超过减仓区", "人工复核减仓纪律", 8, "最接近触发"
     else:
@@ -224,7 +224,10 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
     if not morning:
         lines.append("今日09:20建议不存在，以下仅为持仓盘中风险快照。")
     focus_count = min(5, max(3, sum(row[0] < 90 for row in rows)))
-    for group in ("接近失效/高风险", "最接近触发", "暂不动作"):
+    groups = sorted({row[-1]["group"] for row in rows[:focus_count]},
+                    key=lambda group: min(row[0] for row in rows[:focus_count]
+                                          if row[-1]["group"] == group))
+    for group in groups:
         selected = [row for row in rows[:focus_count] if row[-1]["group"] == group]
         if not selected:
             continue

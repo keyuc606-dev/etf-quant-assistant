@@ -32,7 +32,9 @@ def test_guoxuan_and_woer_distinct_statuses():
     woer = advice("002130", buy_zone=[16.954, 17.276],
                   reduce_zone=[17.614, 17.936], invalidation_price=16.2,
                   target_price=18.2, technical_features={"ATR": .4})
-    assert classify_quote(woer, quote(16.820))["status"] == "跌破买入区但未失效"
+    below = classify_quote(woer, quote(16.820))
+    assert below["status"] == "跌破买入区但未失效"
+    assert guoxuan["priority"] < below["priority"]
 
 
 @pytest.mark.parametrize("price,status", [
