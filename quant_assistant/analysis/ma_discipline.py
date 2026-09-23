@@ -241,6 +241,7 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
 def intraday_ma_discipline(record, quote, price_status=""):
     """Re-evaluate risk against morning MAs without mutating the morning zones."""
     saved = dict(record.get("ma_discipline") or {})
+    had_saved_discipline = bool(saved)
     subtype = record.get("asset_subtype") or saved.get("asset_subtype")
     if subtype == BOND_ETF:
         return saved or _result(subtype, "none")
@@ -269,6 +270,18 @@ def intraday_ma_discipline(record, quote, price_status=""):
                       ma_forbidden_action="禁止继续追高；未到原减仓区不得机械卖出",
                       ma_confirmation=f"盘中价高于早间MA5 {(price-ma5)/atr:.2f} ATR",
                       ma_reason="provisional价格的ATR归一化乖离；不改写早间区间")
+    elif price < ma5 and price >= ma10:
+        result.update(ma_state="MA5跌破但MA10仍守住",
+                      ma_action_hint="保持观望，等待买入区与风险确认",
+                      ma_forbidden_action="禁止把守住MA10直接当作加仓指令",
+                      ma_confirmation="盘中价低于早间MA5但仍守住早间MA10",
+                      ma_reason="provisional价格仅恢复短线/波段结构；不改写早间区间")
+    elif not had_saved_discipline:
+        result.update(ma_state="均线结构未触发",
+                      ma_action_hint="按早间区间与discipline-v1观察",
+                      ma_forbidden_action="禁止仅凭单一均线位置操作",
+                      ma_confirmation="旧版晨报记录已用MA5/MA10/MA20与ATR安全降级复核",
+                      ma_reason="不补猜历史交叉或量价信号；下一次09:20将保存完整MA状态")
 
     # Only evaluate the special no-volume rally when both volume freshness and
     # an explicit exchange limit/seal state are present. Current providers do

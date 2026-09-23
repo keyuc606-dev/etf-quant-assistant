@@ -108,6 +108,16 @@ def test_no_volume_rally_requires_explicit_limit_status():
     assert sealed["ma_action_hint"] == "仅观察，不追涨"
 
 
+def test_intraday_old_morning_record_degrades_without_guessing_cross():
+    record = {"asset_subtype": STOCK, "technical_features":
+              {"MA5": 100, "MA10": 99, "MA20": 96, "ATR": 2}}
+    pullback = intraday_ma_discipline(record, {"price": 99.5})
+    assert pullback["ma_state"] == "MA5跌破但MA10仍守住"
+    normal = intraday_ma_discipline(record, {"price": 101})
+    assert normal["ma_state"] == "均线结构未触发"
+    assert "不补猜历史交叉" in normal["ma_reason"]
+
+
 def test_bond_disabled_and_qdii_avoids_a_share_volume_logic():
     bond = result(ma_frame(), BOND_ETF)
     assert bond["ma_state"] == "不适用" and bond["applicability"] == "none"
