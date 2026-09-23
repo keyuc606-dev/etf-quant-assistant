@@ -440,7 +440,8 @@ class TradingService:
         if not instrument:
             return note
         safe = {key: instrument.get(key) for key in
-                ("name", "market", "asset_type", "asset_subtype")}
+                ("name", "market", "exchange", "asset_type", "asset_subtype",
+                 "market_data_degraded", "identity_source")}
         return "instrument:" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")) + "\n" + (note or "")
 
     @staticmethod

@@ -151,6 +151,56 @@ class TelegramFeedbackTest(unittest.TestCase):
         self.assertEqual(second.pending, proposed.pending)
         self.assertIn("已有一笔", second.response)
 
+    @staticmethod
+    def _resolver(code):
+        instruments = {
+            "000725": {"code": "000725", "name": "京东方A", "asset_type": "STOCK",
+                       "asset_subtype": "STOCK", "market": "深圳", "exchange": "深圳",
+                       "reference_price": None, "market_data_degraded": True,
+                       "identity_source": "sina"},
+            "512890": {"code": "512890", "name": "红利低波ETF", "asset_type": "ETF",
+                       "asset_subtype": "EQUITY_ETF", "market": "ETF", "exchange": "上海",
+                       "reference_price": 1.1, "market_data_degraded": False,
+                       "identity_source": "eastmoney"},
+        }
+        return instruments.get(code)
+
+    def test_first_buy_000725_enters_pending_when_realtime_is_degraded(self):
+        feedback = TelegramTradeFeedback(self.service, self._resolver)
+        proposed = feedback.handle("买入 000725 100股 4.20", 40, "123", None)
+        self.assertIsNotNone(proposed.pending)
+        command = proposed.pending["commands"][0]
+        self.assertEqual(command["asset_type"], "STOCK")
+        self.assertEqual(command["instrument"]["name"], "京东方A")
+        self.assertEqual(command["instrument"]["exchange"], "深圳")
+        self.assertTrue(command["instrument"]["market_data_degraded"])
+        self.assertIn("实时行情暂不可用", proposed.response)
+        confirmed = feedback.handle("确认", 41, "123", proposed.pending)
+        self.assertTrue(confirmed.account_changed)
+        position = next(item for item in self.service.rebuild_portfolio()["positions"]
+                        if item["code"] == "000725")
+        self.assertEqual((position["name"], position["asset_type"], position["asset_subtype"],
+                          position["market"]),
+                         ("京东方A", "STOCK", "STOCK", "深圳"))
+
+    def test_batch_with_000725_and_512890_previews_atomically(self):
+        feedback = TelegramTradeFeedback(self.service, self._resolver)
+        proposed = feedback.handle(
+            "买入 000725 100股 4.20\n买入 512890 100份 1.10", 41, "123", None)
+        self.assertIsNotNone(proposed.pending)
+        self.assertEqual(len(proposed.pending["commands"]), 2)
+        self.assertEqual([item["asset_type"] for item in proposed.pending["commands"]],
+                         ["STOCK", "ETF"])
+
+    def test_genuinely_unknown_instrument_rejects_whole_batch(self):
+        feedback = TelegramTradeFeedback(self.service, self._resolver)
+        before = self.service.rebuild_portfolio()
+        rejected = feedback.handle(
+            "买入 000725 100股 4.20\n买入 000726 100股 4.20", 42, "123", None)
+        self.assertIsNone(rejected.pending)
+        self.assertIn("000726 无法从行情源识别", rejected.response)
+        self.assertEqual(self.service.rebuild_portfolio(), before)
+
 
 class CloudStateTest(unittest.TestCase):
     def test_private_repository_round_trip_and_optimistic_sha(self):

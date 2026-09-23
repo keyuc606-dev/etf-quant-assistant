@@ -21,6 +21,7 @@ PARTIAL_SUBTYPES = {QDII_ETF, GOLD_ETF, COMMODITY_ETF}
 NEAR_ATR = 0.35
 OVERHEAT_ATR = 1.25
 VOLUME_EXPANSION = 1.20
+BURST_ATR = 1.50
 
 
 def _number(value):
@@ -73,6 +74,49 @@ def _recent_stall(frame, atr):
     price_high = close.iloc[-1] >= close.iloc[:-1].max()
     volume_divergence = price_high and volume.iloc[-1] < .75 * volume.iloc[-3:-1].mean()
     return bool(advance >= 1.5 * atr and (stalled or volume_divergence))
+
+
+def _momentum_evidence(frame, price, ma5, atr, near_pressure, stall):
+    """Separate a one-bar expansion from multi-session, multi-factor heat."""
+    tail = frame.tail(6)
+    closes = pd.to_numeric(tail.get("收盘"), errors="coerce")
+    ma5s = pd.to_numeric(tail.get("MA5"), errors="coerce")
+    atrs = pd.to_numeric(tail.get("ATR"), errors="coerce")
+    if closes is None or len(closes) < 2 or closes.isna().any():
+        return False, False, []
+    previous = closes.iloc[-2]
+    daily_rise_atr = (price - previous) / atr
+    single_day_burst = daily_rise_atr >= BURST_ATR
+
+    recent = closes.tail(5)
+    changes = recent.diff().dropna()
+    multi_day_rally = bool(
+        len(changes) >= 3 and (changes > 0).sum() >= 3
+        and (recent.iloc[-1] - recent.iloc[0]) / atr >= 1.5
+    )
+    previous_bias = None
+    if ma5s is not None and atrs is not None and len(ma5s) >= 2 and len(atrs) >= 2:
+        prev_ma5, prev_atr = ma5s.iloc[-2], atrs.iloc[-2]
+        if pd.notna(prev_ma5) and pd.notna(prev_atr) and prev_atr > 0:
+            previous_bias = (previous - prev_ma5) / prev_atr
+    current_bias = (price - ma5) / atr
+    sustained_bias = bool(previous_bias is not None and previous_bias >= .80
+                          and current_bias >= OVERHEAT_ATR
+                          and current_bias >= previous_bias - .15)
+    evidence = []
+    if multi_day_rally:
+        evidence.append("MULTI_DAY_RALLY")
+    if sustained_bias:
+        evidence.append("SUSTAINED_MA5_BIAS")
+    if near_pressure:
+        evidence.append("NEAR_TARGET_PRESSURE")
+    if stall:
+        evidence.append("STALL_DIVERGENCE")
+    persistent = current_bias >= OVERHEAT_ATR and len(evidence) >= 2
+    # A fresh large bar is not persistent merely because it also reaches a target.
+    if single_day_burst and not multi_day_rally and not sustained_bias and not stall:
+        persistent = False
+    return single_day_burst, persistent, evidence
 
 
 def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
@@ -130,6 +174,8 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
     reduce = advice.get("reduce_range") or advice.get("reduce_zone")
     stop = _number(advice.get("stop") if "stop" in advice else advice.get("invalidation_price"))
     near_pressure = bool(reduce and price >= reduce[0] - NEAR_ATR * atr)
+    single_day_burst, persistent_overheat, heat_evidence = _momentum_evidence(
+        frame, price, ma5, atr, near_pressure, stall)
     in_buy = _inside(price, buy)
     forbidden = (discipline or {}).get("forbidden_action", "")
     discipline_blocks_add = any(token in forbidden for token in
@@ -146,6 +192,11 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
         signals.append("STALL_DIVERGENCE")
     if distance_ma5_atr >= OVERHEAT_ATR:
         signals.append("MA5_OVERHEAT")
+    if single_day_burst:
+        signals.append("SINGLE_DAY_MOMENTUM_BURST")
+    if persistent_overheat:
+        signals.append("PERSISTENT_OVERHEAT")
+    signals.extend(code for code in heat_evidence if code not in signals)
     if price < ma10:
         signals.append("MA10_BREAK")
     if price < ma5 and price >= ma10:
@@ -165,6 +216,22 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
                              "连续跌破或偏离达到0.35 ATR；尚缺失效位/关键支撑多重确认"),
             ma_reason="MA20趋势底线失守；清仓结论仍受ATR、关键支撑和既有失效位约束",
         )
+    elif persistent_overheat:
+        result.update(
+            ma_state="persistent_overheat",
+            ma_action_hint="分批锁利复核",
+            ma_forbidden_action="禁止继续追高；禁止一次性机械清仓",
+            ma_confirmation=f"持续性过热获{len(heat_evidence)}项确认：{'、'.join(heat_evidence)}",
+            ma_reason="连续涨幅、持续MA5乖离、目标/压力与滞涨背离至少两项共同确认",
+        )
+    elif single_day_burst:
+        result.update(
+            ma_state="single_day_momentum_burst",
+            ma_action_hint="单日强势脉冲，等待次日确认",
+            ma_forbidden_action="禁止追高；禁止因单日MA5乖离机械减仓",
+            ma_confirmation=f"单日上涨达到 {(price-prev_price)/atr:.2f} ATR；日线无可靠封板状态",
+            ma_reason="此前未形成连续显著拉升，单日扩张与持续性过热分开处理",
+        )
     elif stall:
         result.update(
             ma_state="连续拉升后滞涨/量价背离",
@@ -174,14 +241,12 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
             ma_reason="复用discipline-v1的冲高滞涨出口，不生成第二套独立卖出指令",
         )
     elif distance_ma5_atr >= OVERHEAT_ATR:
-        confirmed = near_pressure
         result.update(
-            ma_state="MA5显著上方乖离/短线过热",
-            ma_action_hint="进入减仓区，分批锁利复核" if confirmed else "偏离过热，减仓止盈复核",
-            ma_forbidden_action="禁止继续追高；未到原减仓区不得机械卖出",
-            ma_confirmation=(f"收盘高于MA5 {distance_ma5_atr:.2f} ATR，且接近/进入原减仓区" if confirmed
-                             else f"收盘高于MA5 {distance_ma5_atr:.2f} ATR；原减仓区尚未确认"),
-            ma_reason="过热阈值按ATR归一化，不使用统一百分比",
+            ma_state="MA5显著乖离/持续性待确认",
+            ma_action_hint="乖离显著但持续性证据不足，等待确认",
+            ma_forbidden_action="禁止追高；禁止仅凭MA5乖离机械减仓",
+            ma_confirmation=f"收盘高于MA5 {distance_ma5_atr:.2f} ATR，但持续性证据不足两项",
+            ma_reason="ATR乖离仅是候选证据，不再单独触发持续性过热",
         )
     elif price < ma10:
         result.update(
@@ -253,6 +318,14 @@ def intraday_ma_discipline(record, quote, price_status=""):
     if not all(value is not None and value > 0 for value in (price, ma5, ma10, ma20, atr)):
         return saved or _result(subtype)
     result = saved or _result(subtype)
+    previous_close = _number(quote.get("previous_close"))
+    rise_atr = ((price - previous_close) / atr if previous_close else None)
+    burst = rise_atr is not None and rise_atr >= BURST_ATR
+    limit_status = quote.get("limit_status")
+    high = _number(quote.get("high"))
+    reversed_from_high = bool(high and high - price >= .50 * atr)
+    reversal = bool(quote.get("intraday_reversal") or quote.get("volume_divergence")
+                    or limit_status == "broken" or reversed_from_high)
     if price < ma20 and ma20 - price >= NEAR_ATR * atr:
         result.update(ma_state="MA20有效跌破/趋势破坏", ma_action_hint="趋势失效，优先减仓复核",
                       ma_forbidden_action="禁止加仓；清仓需失效位与关键支撑多重确认",
@@ -263,13 +336,23 @@ def intraday_ma_discipline(record, quote, price_status=""):
                       ma_forbidden_action="禁止机械卖出或弱势补仓",
                       ma_confirmation="盘中价失守早间MA10",
                       ma_reason="provisional价格确认波段防守转弱；不改写早间区间")
-    elif price - ma5 >= OVERHEAT_ATR * atr:
-        result.update(ma_state="MA5显著上方乖离/短线过热",
-                      ma_action_hint=("进入减仓区，分批锁利复核" if "减仓区" in price_status
-                                      else "偏离过热，减仓止盈复核"),
-                      ma_forbidden_action="禁止继续追高；未到原减仓区不得机械卖出",
-                      ma_confirmation=f"盘中价高于早间MA5 {(price-ma5)/atr:.2f} ATR",
-                      ma_reason="provisional价格的ATR归一化乖离；不改写早间区间")
+    elif result.get("ma_state") == "persistent_overheat" and price - ma5 >= OVERHEAT_ATR * atr:
+        result.update(ma_action_hint="分批锁利复核",
+                      ma_confirmation="早间多因素持续性过热仍成立，盘中乖离未解除")
+    elif burst or price - ma5 >= OVERHEAT_ATR * atr:
+        if limit_status == "sealed":
+            action = "强势脉冲/观察，不追高，不因单日乖离机械减仓"
+            confirmation = "可靠封板状态已核验"
+        elif limit_status in ("not_sealed", "broken") and reversal:
+            action = "冲高回落/炸板，减仓复核"
+            confirmation = "未封板且出现冲高回落、炸板或量价背离"
+        else:
+            action = "单日强势脉冲，等待次日确认"
+            confirmation = "封板数据缺失或尚无可靠冲高回落证据"
+        result.update(ma_state="single_day_momentum_burst", ma_action_hint=action,
+                      ma_forbidden_action="禁止追高；禁止因单日MA5乖离机械减仓",
+                      ma_confirmation=confirmation,
+                      ma_reason="盘中单日扩张不等同于多日持续性过热")
     elif price < ma5 and price >= ma10:
         result.update(ma_state="MA5跌破但MA10仍守住",
                       ma_action_hint="保持观望，等待买入区与风险确认",
@@ -286,23 +369,26 @@ def intraday_ma_discipline(record, quote, price_status=""):
     # Only evaluate the special no-volume rally when both volume freshness and
     # an explicit exchange limit/seal state are present. Current providers do
     # not guarantee the latter, so normal production quotes safely omit it.
-    limit_status = quote.get("limit_status")
     progress = _number(quote.get("session_progress"))
     volume = _number(quote.get("volume"))
     baseline = _number(record.get("reference_volume"))
-    previous_close = _number(quote.get("previous_close"))
     if (limit_status in ("sealed", "not_sealed") and progress and progress >= .15
             and volume and baseline and previous_close and price > previous_close):
         ratio = volume / (baseline if progress >= .9375 else baseline * progress)
         rise_atr = (price - previous_close) / atr
         if ratio <= .60 and rise_atr >= .75:
-            result.update(
-                ma_state="无量拉升（封板观察）" if limit_status == "sealed" else "无量拉升",
-                ma_action_hint="仅观察，不追涨" if limit_status == "sealed" else "风险提示/减仓复核",
-                ma_forbidden_action="禁止追涨；禁止从封板状态推导自动持有结论",
-                ma_confirmation=f"盘中量能进度归一化为基准{ratio:.2f}倍，封板状态可核验",
-                ma_reason="仅在新鲜当日量能与明确封板状态同时可用时启用",
-            )
+            if limit_status == "sealed":
+                result.update(ma_state="single_day_momentum_burst",
+                              ma_action_hint="强势脉冲/观察，不追高，不因单日乖离机械减仓",
+                              ma_forbidden_action="禁止追涨；禁止从封板状态推导自动持有结论",
+                              ma_confirmation=f"封板可靠；量能为进度基准{ratio:.2f}倍",
+                              ma_reason="封板脉冲优先观察，不由单日乖离触发卖出")
+            elif reversal:
+                result.update(ma_state="single_day_momentum_burst",
+                              ma_action_hint="冲高回落/炸板，减仓复核",
+                              ma_forbidden_action="禁止追涨",
+                              ma_confirmation=f"未封板且回落；量能为进度基准{ratio:.2f}倍",
+                              ma_reason="单日脉冲只有在未封板并出现回落/背离时进入减仓复核")
     return result
 
 
@@ -313,6 +399,10 @@ def compact_ma_note(result):
         return "不适用｜债券ETF仅做异常趋势监测"
     if result.get("applicability") == "partial":
         return f"{state}｜部分启用，不使用A股量能逻辑"
+    if state == "single_day_momentum_burst":
+        return f"单日强势脉冲｜{action}"
+    if state == "persistent_overheat":
+        return f"持续性过热｜{action}"
     return f"{state}｜{action}"
 
 
@@ -323,7 +413,11 @@ def intraday_priority_adjustment(verdict, ma_result):
         return 0
     if status == "跌破买入区但未失效" and state in ("MA10跌破", "MA20有效跌破/趋势破坏"):
         return 1
-    if status in ("已进入减仓区", "已超过减仓区") and "过热" in state:
+    if status in ("目标已达", "已进入减仓区", "已超过减仓区") and state == "persistent_overheat":
+        return 2
+    if (status in ("目标已达", "已进入减仓区", "已超过减仓区")
+            and state == "single_day_momentum_burst"
+            and "减仓复核" in ma_result.get("ma_action_hint", "")):
         return 2
     if status in ("已进入买入区", "接近买入区") and ma_result.get("ma_conflict_flag"):
         return 3

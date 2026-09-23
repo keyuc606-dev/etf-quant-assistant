@@ -96,7 +96,9 @@ class TelegramTradeFeedback:
             action = "买入" if item.side == "BUY" else "卖出"
             unit = "份" if item.asset_type == "ETF" else "股"
             name = (item.instrument or {}).get("name", "")
-            lines.append(f"{index}. {action} {item.code} {name} {item.quantity}{unit} @ ￥{item.price:.4f}；费用 ￥{item.fee:.2f}")
+            degraded = "；实时行情暂不可用，按输入成交价预检" if (item.instrument or {}).get(
+                "market_data_degraded") else ""
+            lines.append(f"{index}. {action} {item.code} {name} {item.quantity}{unit} @ ￥{item.price:.4f}；费用 ￥{item.fee:.2f}{degraded}")
         lines.extend([f"预计成交后现金 ￥{preview['cash']:,.2f}", "发送“确认”全部记账，或发送“取消”整批放弃。"])
         return FeedbackResult(new_pending, "\n".join(lines))
 

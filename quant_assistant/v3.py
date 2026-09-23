@@ -286,9 +286,14 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                 reminder = "接近失效 + MA20趋势破坏：禁止加仓，优先减仓复核"
             elif verdict["status"] == "已失效":
                 reminder = "停止早间买入计划，人工复核风险"
-            elif (verdict["status"] in ("已进入减仓区", "已超过减仓区")
-                  and "过热" in ma_result.get("ma_state", "")):
-                reminder = "进入减仓区 + MA5乖离过热：分批锁利复核"
+            elif (verdict["status"] in ("目标已达", "已进入减仓区", "已超过减仓区")
+                  and ma_result.get("ma_state") == "persistent_overheat"):
+                reminder = "目标已达 + 持续性过热：分批锁利复核"
+            elif (verdict["status"] in ("目标已达", "已进入减仓区", "已超过减仓区")
+                  and ma_result.get("ma_state") == "single_day_momentum_burst"):
+                reminder = ("目标已达 + 单日强势脉冲：" +
+                            ("减仓复核" if "减仓复核" in ma_result.get("ma_action_hint", "")
+                             else "观察，不因单日乖离机械减仓"))
             elif (verdict["status"] == "跌破买入区但未失效"
                   and ma_result.get("ma_state") == "MA10跌破"):
                 reminder = "跌破买入区 + MA10失守：风险收缩/减仓观察"

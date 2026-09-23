@@ -18,6 +18,7 @@ import akshare as ak
 
 from ..config import CACHE_DIR
 from ..models import Market
+from ..asset_routing import classify_asset_subtype
 
 
 # A股收盘以北京时间为准；部署在 UTC 容器/CI 上时本地时区会错位 8 小时
@@ -579,25 +580,88 @@ class DataFetcher:
             return None
 
     def identify_security(self, code: str) -> Optional[dict]:
-        """从现有免费行情源识别六位沪深股票或场内 ETF。"""
+        """分层确认六位沪深股票或场内 ETF，不把实时价失败当作证券无效。"""
         code = str(code).strip()
-        if not re.fullmatch(r"\d{6}", code):
+        stock_prefix = re.fullmatch(r"(?:000|001|002|003|300|301|600|601|603|605|688|689)\d{3}", code)
+        etf_prefix = re.fullmatch(r"(?:15|16|18|50|51|52|56|58)\d{4}", code)
+        if not (stock_prefix or etf_prefix):
             return None
-        for market_key, asset_type in (("ETF", "ETF"), ("A", "STOCK")):
-            item = self._lookup_spot(market_key, code)
-            if item is None:
-                continue
-            name = str(item.get("name") or "").strip()
-            if (not name or item.get("price", 0.0) <= 0 or "退" in name
-                    or "ST" in name.upper()):
+
+        expected_type = "ETF" if etf_prefix else "STOCK"
+        market_key = "ETF" if expected_type == "ETF" else "A"
+        item = self._lookup_spot(market_key, code)
+        if item is not None:
+            if self._security_explicitly_unsafe(item):
                 return None
-            exchange = "上海" if code.startswith(("5", "6", "68")) else "深圳"
-            return {
-                "code": code, "name": name, "asset_type": asset_type,
-                "market": "ETF" if asset_type == "ETF" else exchange,
-                "exchange": exchange, "reference_price": float(item["price"]),
-            }
+            instrument = self._confirmed_instrument(code, expected_type, item, "eastmoney")
+            if instrument is not None:
+                return instrument
+
+        # Independent single-symbol sources still identify a listed security when the
+        # all-market realtime table is unavailable.  Their price is deliberately
+        # optional: the Telegram command already supplies the explicit execution price.
+        for source, lookup in (("sina", self._sina_security_metadata),
+                               ("tencent", self._tencent_security_metadata)):
+            metadata = lookup(code)
+            instrument = self._confirmed_instrument(code, expected_type, metadata, source,
+                                                    market_data_degraded=True)
+            if instrument is not None:
+                return instrument
         return None
+
+    @staticmethod
+    def _security_explicitly_unsafe(item: dict) -> bool:
+        name = str(item.get("name") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        return (any(flag in status for flag in ("delisted", "suspended", "abnormal"))
+                or "退" in name or "ST" in name.upper())
+
+    @staticmethod
+    def _confirmed_instrument(code: str, asset_type: str, item: Optional[dict],
+                              source: str, market_data_degraded: bool = False) -> Optional[dict]:
+        if not item:
+            return None
+        name = str(item.get("name") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        if (not name or any(flag in status for flag in ("delisted", "suspended", "abnormal"))
+                or "退" in name or "ST" in name.upper()):
+            return None
+        price = _safe_float(item.get("price"))
+        exchange = "上海" if code.startswith(("5", "6")) else "深圳"
+        degraded = market_data_degraded or price <= 0
+        instrument = {
+            "code": code, "name": name, "asset_type": asset_type,
+            "market": "ETF" if asset_type == "ETF" else exchange,
+            "exchange": exchange, "reference_price": price or None,
+            "market_data_degraded": degraded, "identity_source": source,
+        }
+        instrument["asset_subtype"] = classify_asset_subtype(
+            code, name, instrument["market"], asset_type, metadata=instrument)
+        return instrument
+
+    def _sina_security_metadata(self, code: str) -> Optional[dict]:
+        exchange = "sh" if code.startswith(("5", "6")) else "sz"
+        request = urllib.request.Request(
+            f"https://hq.sinajs.cn/list={exchange}{code}",
+            headers={"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                fields = response.read().decode("gbk").split('"')[1].split(",")
+            return {"name": fields[0], "price": _safe_float(fields[3])}
+        except (IndexError, OSError, urllib.error.URLError):
+            return None
+
+    def _tencent_security_metadata(self, code: str) -> Optional[dict]:
+        exchange = "sh" if code.startswith(("5", "6")) else "sz"
+        request = urllib.request.Request(
+            f"https://qt.gtimg.cn/q={exchange}{code}", headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                fields = response.read().decode("gbk").split('"')[1].split("~")
+            return {"name": fields[1], "price": _safe_float(fields[3])}
+        except (IndexError, OSError, urllib.error.URLError):
+            return None
 
     def request_openai_json(self, api_key: str, model: str, payload: dict) -> dict:
         """调用 OpenAI Responses API；调用方只传去标识化的规则候选与技术摘要。"""

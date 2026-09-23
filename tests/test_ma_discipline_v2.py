@@ -48,8 +48,8 @@ def result(frame, subtype=STOCK, advice=None, forbidden="禁止仅凭成本价�
 
 def test_atr_normalized_overheat_and_pullback_states():
     hot = result(ma_frame(price=106, ma5=100, ma10=98, ma20=95, atr=2))
-    assert hot["ma_state"] == "MA5显著上方乖离/短线过热"
-    assert "3.00 ATR" in hot["ma_confirmation"]
+    assert hot["ma_state"] == "single_day_momentum_burst"
+    assert "单日MA5乖离机械减仓" in hot["ma_forbidden_action"]
     pullback = result(ma_frame(price=99, ma5=100, ma10=98, ma20=95))
     assert pullback["ma_state"] == "MA5跌破但MA10仍守住"
     assert "直接当作加仓" in pullback["ma_forbidden_action"]
@@ -103,9 +103,9 @@ def test_no_volume_rally_requires_explicit_limit_status():
     degraded = intraday_ma_discipline(record, quote)
     assert "无量拉升" not in degraded["ma_state"]
     available = intraday_ma_discipline(record, {**quote, "limit_status": "not_sealed"})
-    assert available["ma_state"] == "无量拉升"
+    assert available["ma_state"] != "persistent_overheat"
     sealed = intraday_ma_discipline(record, {**quote, "limit_status": "sealed"})
-    assert sealed["ma_action_hint"] == "仅观察，不追涨"
+    assert "观察" in sealed["ma_action_hint"]
 
 
 def test_intraday_old_morning_record_degrades_without_guessing_cross():
@@ -125,6 +125,45 @@ def test_bond_disabled_and_qdii_avoids_a_share_volume_logic():
     assert qdii["applicability"] == "partial"
     assert "不使用A股成交量" in qdii["ma_confirmation"]
     assert "放量" not in qdii["ma_state"]
+    qdii_intraday = intraday_ma_discipline(
+        {"asset_subtype": QDII_ETF, "ma_discipline": qdii,
+         "technical_features": {"MA5": 100, "MA10": 99, "MA20": 96, "ATR": 2}},
+        {"price": 110, "previous_close": 100, "limit_status": "sealed"})
+    assert qdii_intraday["ma_state"] == qdii["ma_state"]
+
+
+def test_single_day_limit_like_bar_is_not_persistent_overheat():
+    frame = ma_frame(price=110, ma5=102, ma10=100, ma20=96, atr=2,
+                     prev_price=100, prev_ma5=100, prev_ma10=99)
+    burst = result(frame, advice={**ADVICE, "reduce_range": [109, 112]})
+    assert burst["ma_state"] == "single_day_momentum_burst"
+    assert "SINGLE_DAY_MOMENTUM_BURST" in burst["signal_codes"]
+    assert "PERSISTENT_OVERHEAT" not in burst["signal_codes"]
+    assert burst["ma_action_hint"] == "单日强势脉冲，等待次日确认"
+
+
+def test_intraday_unsealed_burst_with_reversal_enters_reduce_review():
+    record = {"asset_subtype": STOCK, "technical_features":
+              {"MA5": 100, "MA10": 99, "MA20": 96, "ATR": 2},
+              "ma_discipline": result(ma_frame())}
+    reviewed = intraday_ma_discipline(record, {
+        "price": 109, "previous_close": 100, "high": 111,
+        "limit_status": "not_sealed", "intraday_reversal": True})
+    assert reviewed["ma_state"] == "single_day_momentum_burst"
+    assert "减仓复核" in reviewed["ma_action_hint"]
+    missing_seal = intraday_ma_discipline(record, {"price": 109, "previous_close": 100})
+    assert missing_seal["ma_action_hint"] == "单日强势脉冲，等待次日确认"
+
+
+def test_multi_day_rally_sustained_bias_and_target_is_persistent_overheat():
+    frame = ma_frame(price=108, ma5=104, ma10=101, ma20=96, atr=2,
+                     prev_price=106, prev_ma5=102, prev_ma10=100)
+    frame.loc[frame.index[-5]:, "收盘"] = [100, 102, 104, 106, 108]
+    frame.loc[frame.index[-5]:, "MA5"] = [99, 100, 101, 102, 104]
+    hot = result(frame, advice={**ADVICE, "reduce_range": [108, 112]})
+    assert hot["ma_state"] == "persistent_overheat"
+    assert hot["ma_action_hint"] == "分批锁利复核"
+    assert "PERSISTENT_OVERHEAT" in hot["signal_codes"]
 
 
 def test_morning_compact_display_and_advice_history_persistence(tmp_path):
@@ -184,3 +223,34 @@ def test_intraday_fuses_ma_risk_into_priority_and_text():
     text = build_intraday(SimpleNamespace(positions=positions), records, Fetcher(), NOW)
     assert text.index("均线风险") < text.index("普通触发")
     assert "跌破买入区 + MA10失守" in text
+
+
+def test_intraday_target_text_distinguishes_burst_from_persistent_heat():
+    position = SimpleNamespace(code="000725", name="京东方A", market=Market.A_SZ,
+                               asset_type="STOCK", asset_subtype=STOCK)
+    base = {"as_of": NOW.date().isoformat(), "code": "000725",
+            "buy_zone": [98, 101], "reduce_zone": [110, 112],
+            "invalidation_price": 95, "target_price": 110,
+            "reference_volume": 1000, "asset_type": "STOCK",
+            "asset_subtype": STOCK,
+            "discipline": {"forbidden_action": "禁止仅凭成本价加仓"},
+            "technical_features": {"MA5": 100, "MA10": 99, "MA20": 96, "ATR": 2}}
+
+    class Fetcher:
+        def fetch_intraday_quote(self, *_):
+            return {"price": 110.5, "change_pct": 9.9, "volume": 500,
+                    "amount": 100000, "as_of": NOW.isoformat(),
+                    "provisional": True}
+
+    burst = {**base, "ma_discipline": {
+        **result(ma_frame(price=110, ma5=102, prev_price=100)),
+        "ma_state": "single_day_momentum_burst"}}
+    burst_text = build_intraday(SimpleNamespace(positions=[position]), [burst], Fetcher(), NOW)
+    assert "目标已达 + 单日强势脉冲：观察，不因单日乖离机械减仓" in burst_text
+
+    persistent = {**base, "ma_discipline": {
+        **result(ma_frame()), "ma_state": "persistent_overheat",
+        "ma_action_hint": "分批锁利复核"}}
+    persistent_text = build_intraday(
+        SimpleNamespace(positions=[position]), [persistent], Fetcher(), NOW)
+    assert "目标已达 + 持续性过热：分批锁利复核" in persistent_text

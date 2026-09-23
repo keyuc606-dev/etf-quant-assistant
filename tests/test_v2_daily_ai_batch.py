@@ -85,11 +85,41 @@ class SecurityIdentificationV2Test(unittest.TestCase):
         self.assertEqual(item["asset_type"], "ETF")
         self.assertEqual(item["exchange"], "上海")
 
-    def test_unknown_or_suspended_security_is_rejected(self):
+    def test_realtime_price_unavailable_keeps_confirmed_security_degraded(self):
         fetcher = DataFetcher(Path(tempfile.mkdtemp()))
         table = pd.DataFrame({"代码": ["512890"], "名称": ["红利低波ETF"], "最新价": [0]})
         with mock.patch.object(fetcher, "_spot_table", return_value=table):
-            self.assertIsNone(fetcher.identify_security("512890"))
+            item = fetcher.identify_security("512890")
+        self.assertEqual(item["asset_type"], "ETF")
+        self.assertTrue(item["market_data_degraded"])
+
+    def test_000725_primary_failure_uses_backup_metadata(self):
+        fetcher = DataFetcher(Path(tempfile.mkdtemp()))
+        with mock.patch.object(fetcher, "_lookup_spot", return_value=None), \
+                mock.patch.object(fetcher, "_sina_security_metadata",
+                                  return_value={"name": "京东方A", "price": 0}), \
+                mock.patch.object(fetcher, "_tencent_security_metadata", return_value=None):
+            item = fetcher.identify_security("000725")
+        self.assertEqual((item["name"], item["asset_type"], item["asset_subtype"], item["exchange"]),
+                         ("京东方A", "STOCK", "STOCK", "深圳"))
+        self.assertTrue(item["market_data_degraded"])
+
+    def test_all_identity_sources_fail_or_prefix_invalid_is_rejected(self):
+        fetcher = DataFetcher(Path(tempfile.mkdtemp()))
+        with mock.patch.object(fetcher, "_lookup_spot", return_value=None), \
+                mock.patch.object(fetcher, "_sina_security_metadata", return_value=None), \
+                mock.patch.object(fetcher, "_tencent_security_metadata", return_value=None):
+            self.assertIsNone(fetcher.identify_security("000725"))
+        self.assertIsNone(fetcher.identify_security("999999"))
+
+    def test_explicit_abnormal_security_is_rejected(self):
+        fetcher = DataFetcher(Path(tempfile.mkdtemp()))
+        with mock.patch.object(fetcher, "_lookup_spot",
+                               return_value={"name": "京东方A", "price": 4,
+                                             "status": "suspended"}), \
+                mock.patch.object(fetcher, "_sina_security_metadata", return_value=None), \
+                mock.patch.object(fetcher, "_tencent_security_metadata", return_value=None):
+            self.assertIsNone(fetcher.identify_security("000725"))
 
 
 class ConcurrencyV2Test(unittest.TestCase):
