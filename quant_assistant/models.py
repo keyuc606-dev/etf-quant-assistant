@@ -21,6 +21,7 @@ class StockPosition:
     current_price: float
     asset_type: str = ""
     sector: str = ""
+    asset_subtype: str = ""
     last_updated: Optional[datetime.datetime] = None
     # 基本面因子（0 表示未录入）
     pe: float = 0.0

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ..config import DATA_DIR, ETF_POOL
+from ..asset_routing import classify_asset_subtype
 from ..news.themes import ACCOUNT_THEME_MAP
 from ..portfolio.holdings import PortfolioManager
 from .models import TradeResult
@@ -57,6 +58,10 @@ class TradingService:
                     "asset_type": position.asset_type or (
                         "ETF" if position.market.value == "ETF" else "STOCK"
                     ),
+                    "asset_subtype": classify_asset_subtype(
+                        position.code, position.name, position.market, position.asset_type,
+                        explicit=position.asset_subtype,
+                    ),
                     "cost_price": position.cost_price, "current_price": position.current_price,
                     "sector": position.sector,
                     "last_updated": position.last_updated.isoformat() if position.last_updated else None,
@@ -70,7 +75,8 @@ class TradingService:
     def _apply_trade(state: dict, side: str, code: str, quantity: int,
                      price: Decimal, fee: Decimal,
                      asset_type: Optional[str] = None,
-                     instrument: Optional[dict] = None) -> Tuple[Optional[Decimal], Optional[dict]]:
+                     instrument: Optional[dict] = None,
+                     asset_subtype: Optional[str] = None) -> Tuple[Optional[Decimal], Optional[dict]]:
         positions = state["positions"]
         cash = _decimal(state["cash"])
         amount = price * quantity
@@ -78,6 +84,16 @@ class TradingService:
         resolved_type = asset_type or (
             current.get("asset_type") if current else None
         ) or ("ETF" if ETF_CODE_PATTERN.fullmatch(code) else "STOCK")
+        instrument = instrument or {}
+        resolved_subtype = classify_asset_subtype(
+            code,
+            instrument.get("name") or (current or {}).get("name", ""),
+            instrument.get("market") or (current or {}).get("market"),
+            resolved_type,
+            metadata=instrument,
+            explicit=asset_subtype or instrument.get("asset_subtype")
+            or (current or {}).get("asset_subtype", ""),
+        )
         if current is not None:
             current_type = current.get("asset_type") or (
                 "ETF" if current.get("market") == "ETF" else "STOCK"
@@ -97,13 +113,13 @@ class TradingService:
             average_cost = (old_cost * old_quantity + amount + fee) / new_quantity
             if current is None:
                 meta = ACCOUNT_THEME_MAP.get(code, ETF_POOL.get(code, {}))
-                instrument = instrument or {}
                 current = {
                     "code": code,
                     "name": instrument.get("name") or meta.get("name", f"{resolved_type} {code}"),
                     "market": instrument.get("market") or ("ETF" if resolved_type == "ETF" else (
                         "上海" if code.startswith(("6", "68")) else "深圳")),
                     "asset_type": resolved_type,
+                    "asset_subtype": resolved_subtype,
                     "shares": new_quantity,
                     "cost_price": float(average_cost),
                     "current_price": float(price),
@@ -184,6 +200,11 @@ class TradingService:
         side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
             side, code, quantity, price, fee, asset_type
         )
+        asset_subtype = classify_asset_subtype(
+            code, (instrument or {}).get("name", ""), (instrument or {}).get("market"),
+            asset_type, metadata=instrument,
+            explicit=(instrument or {}).get("asset_subtype", ""),
+        )
         normalized_external_id = external_id.strip() if external_id and external_id.strip() else None
         normalized_source = source.strip() if source and source.strip() else "manual"
         execution_time = executed_at or _now_iso()
@@ -220,7 +241,7 @@ class TradingService:
                 state = self.repository.rebuild_account_state(self._rebuild_from_facts)
                 realized_pnl, updated_position = self._apply_trade(
                     state, side, code, quantity, price_value, fee_value, asset_type,
-                    instrument,
+                    instrument, asset_subtype,
                 )
                 execution = {
                     "execution_id": new_execution_id,
@@ -228,6 +249,7 @@ class TradingService:
                     "side": side,
                     "code": code,
                     "asset_type": asset_type,
+                    "asset_subtype": asset_subtype,
                     "quantity": quantity,
                     "price": float(price_value),
                     "fee": float(fee_value),
@@ -259,6 +281,11 @@ class TradingService:
         side, code, asset_type, quantity, price_value, fee_value = self._validate_trade(
             side, code, quantity, price, fee, asset_type
         )
+        asset_subtype = classify_asset_subtype(
+            code, (instrument or {}).get("name", ""), (instrument or {}).get("market"),
+            asset_type, metadata=instrument,
+            explicit=(instrument or {}).get("asset_subtype", ""),
+        )
         if not self.repository.is_initialized():
             raise ValueError("成交台账尚未初始化；请先运行 portfolio-reconcile --initialize")
         state = copy.deepcopy(
@@ -266,12 +293,13 @@ class TradingService:
         )
         realized_pnl, updated_position = self._apply_trade(
             state, side, code, quantity, price_value, fee_value, asset_type,
-            instrument,
+            instrument, asset_subtype,
         )
         return {
             "side": side,
             "code": code,
             "asset_type": asset_type,
+            "asset_subtype": asset_subtype,
             "quantity": quantity,
             "price": float(price_value),
             "fee": float(fee_value),
@@ -302,14 +330,22 @@ class TradingService:
                     trade["side"], trade["code"], trade["quantity"], trade["price"],
                     trade.get("fee", 0.0), trade.get("asset_type"),
                 )
+                asset_subtype = classify_asset_subtype(
+                    code, (trade.get("instrument") or {}).get("name", ""),
+                    (trade.get("instrument") or {}).get("market"), asset_type,
+                    metadata=trade.get("instrument"),
+                    explicit=trade.get("asset_subtype") or
+                    (trade.get("instrument") or {}).get("asset_subtype", ""),
+                )
                 pnl, position = self._apply_trade(
                     state, side, code, quantity, price, fee, asset_type,
-                    trade.get("instrument"),
+                    trade.get("instrument"), asset_subtype,
                 )
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"第{index}笔：{error}") from error
             previews.append({
                 "side": side, "code": code, "asset_type": asset_type,
+                "asset_subtype": asset_subtype,
                 "quantity": quantity, "price": float(price), "fee": float(fee),
                 "cash": float(state["cash"]),
                 "position_quantity": position["shares"] if position else 0,
@@ -331,6 +367,13 @@ class TradingService:
                         trade["side"], trade["code"], trade["quantity"], trade["price"],
                         trade.get("fee", 0.0), trade.get("asset_type"),
                     )
+                    asset_subtype = classify_asset_subtype(
+                        code, (trade.get("instrument") or {}).get("name", ""),
+                        (trade.get("instrument") or {}).get("market"), asset_type,
+                        metadata=trade.get("instrument"),
+                        explicit=trade.get("asset_subtype") or
+                        (trade.get("instrument") or {}).get("asset_subtype", ""),
+                    )
                     external_id = f"{batch_external_id}:{index}"
                     existing = self.repository.get_execution_by_external_id(external_id)
                     if existing is not None:
@@ -339,11 +382,12 @@ class TradingService:
                         continue
                     pnl, _position = self._apply_trade(
                         state, side, code, quantity, price, fee, asset_type,
-                        trade.get("instrument"),
+                        trade.get("instrument"), asset_subtype,
                     )
                     execution = self.repository.append_execution({
                         "execution_id": str(uuid.uuid4()), "external_id": external_id,
                         "side": side, "code": code, "asset_type": asset_type,
+                        "asset_subtype": asset_subtype,
                         "quantity": quantity, "price": float(price), "fee": float(fee),
                         "executed_at": _now_iso(), "source": source,
                         "related_plan_id": None,
@@ -387,7 +431,7 @@ class TradingService:
             self._apply_trade(
                 state, row["side"], row["code"], row["quantity"],
                 _decimal(row["price"]), _decimal(row["fee"]), row.get("asset_type"),
-                instrument,
+                instrument, row.get("asset_subtype"),
             )
         return state
 
@@ -395,7 +439,8 @@ class TradingService:
     def _instrument_note(note: Optional[str], instrument: Optional[dict]) -> Optional[str]:
         if not instrument:
             return note
-        safe = {key: instrument.get(key) for key in ("name", "market", "asset_type")}
+        safe = {key: instrument.get(key) for key in
+                ("name", "market", "asset_type", "asset_subtype")}
         return "instrument:" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")) + "\n" + (note or "")
 
     @staticmethod
@@ -437,6 +482,10 @@ class TradingService:
         positions = []
         for code in sorted(state["positions"]):
             item = dict(state["positions"][code])
+            item["asset_subtype"] = classify_asset_subtype(
+                code, item.get("name", ""), item.get("market"), item.get("asset_type", ""),
+                metadata=item, explicit=item.get("asset_subtype", ""),
+            )
             live = actual_positions.get(code)
             if live:
                 for field in ("current_price", "last_updated", "pe", "pb", "roe", "market_cap"):
@@ -497,8 +546,18 @@ class TradingService:
                     f"{code} 平均成本不一致: SQLite={left['cost_price']:.9f}, "
                     f"portfolio.json={float(right.get('cost_price', 0.0)):.9f}"
                 )
-            for field in ("name", "market", "asset_type", "sector"):
-                if left.get(field, "") != right.get(field, ""):
+            for field in ("name", "market", "asset_type", "asset_subtype", "sector"):
+                left_value, right_value = left.get(field, ""), right.get(field, "")
+                if field == "asset_subtype":
+                    left_value = classify_asset_subtype(
+                        code, left.get("name", ""), left.get("market"), left.get("asset_type", ""),
+                        metadata=left, explicit=left_value,
+                    )
+                    right_value = classify_asset_subtype(
+                        code, right.get("name", ""), right.get("market"), right.get("asset_type", ""),
+                        metadata=right, explicit=right_value,
+                    )
+                if left_value != right_value:
                     differences.append(f"{code} {field} 不一致")
         return differences
 

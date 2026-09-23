@@ -6,6 +6,9 @@ from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
+from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
+                             subtype_for)
+
 
 ACTION_LABELS = {"HOLD": "持有", "WATCH": "观望", "REDUCE": "减仓", "ADD_SMALL": "小幅加仓"}
 ACTION_TOKENS = {"HOLD": "持有", "WATCH": "观望", "REDUCE": "减仓", "ADD_SMALL": "加仓"}
@@ -19,7 +22,7 @@ def _finite(value) -> Optional[float]:
     return number if number == number and abs(number) != float("inf") else None
 
 
-def build_rule_advice(view: dict, frame: Optional[pd.DataFrame]) -> dict:
+def _build_equity_advice(view: dict, frame: Optional[pd.DataFrame]) -> dict:
     """所有价格和仓位数字均在这里由确定性规则产生。"""
     pos = view["position"]
     if not view["available"] or frame is None or len(frame) < 20:
@@ -46,7 +49,7 @@ def build_rule_advice(view: dict, frame: Optional[pd.DataFrame]) -> dict:
     low20 = _finite(lows.min()) if lows is not None else None
     high20 = _finite(highs.max()) if highs is not None else None
     if close is None or close <= 0 or atr is None or atr <= 0:
-        return build_rule_advice({**view, "available": False}, None)
+        return _build_equity_advice({**view, "available": False}, None)
 
     supports = [v for v in (ma20, boll_dn, low20, float(pos.cost_price)) if v and v > 0 and v <= close * 1.15]
     resistances = [v for v in (ma60, boll_up, high20) if v and v > 0 and v >= close * 0.85]
@@ -86,6 +89,99 @@ def build_rule_advice(view: dict, frame: Optional[pd.DataFrame]) -> dict:
         "position_change": change, "confidence": confidence,
         "reasons": reasons, "ai_note": None,
     }
+
+
+def _bond_advice(view: dict, frame: Optional[pd.DataFrame], subtype: str) -> dict:
+    pos = view["position"]
+    unavailable = not view.get("available") or frame is None or len(frame) < 20
+    weight = float(view.get("weight") or 0)
+    if unavailable:
+        status = "防守资产数据不足"
+        action = "WATCH"
+        confidence = "低"
+        reasons = ["债券ETF行情或样本不足，仅保留账户仓位复核",
+                   "宏观利率、久期和折溢价信息未纳入，不作方向推断"]
+    else:
+        last = frame.iloc[-1]
+        close, ma20, atr = (_finite(last.get(key)) for key in ("收盘", "MA20", "ATR"))
+        if weight > .20:
+            status, action = "防守仓位偏高需复核", "WATCH"
+        elif weight < .08:
+            status, action = "防守仓位偏低可关注", "WATCH"
+        else:
+            status, action = "防守仓位正常", "HOLD"
+        trend = "不可用"
+        if close is not None and ma20 is not None:
+            trend = "偏强" if close >= ma20 else "偏弱"
+        atr_note = (f"ATR波动约占价格 {atr / close:.2%}，仅作异常监测"
+                    if close and atr else "ATR波动数据不足")
+        liquidity = "成交额/深度数据不足，流动性需人工核验"
+        amount = _finite(last.get("成交额"))
+        if amount and amount > 0:
+            liquidity = f"最近完整交易日成交额约 ￥{amount:,.0f}，仍需核验实时深度"
+        reasons = [f"{status}；价格趋势{trend}仅作辅助", atr_note, liquidity,
+                   "宏观利率、久期和折溢价信息未纳入，本条仅做账户防守仓位复核"]
+        confidence = "中" if close and atr else "低"
+    return {
+        "code": pos.code, "asset_subtype": subtype, "action": action,
+        "action_label": "持有" if action == "HOLD" else status,
+        "buy_range": None, "reduce_range": None, "stop": None, "target": None,
+        "position_change": "0 个百分点", "confidence": confidence,
+        "reasons": reasons, "ai_note": None, "asset_status": status,
+        "routing_note": "不按股票 RSI、BOLL、压力位、浅套/深套或做T纪律机械处理",
+    }
+
+
+def _macro_asset_advice(view: dict, frame: Optional[pd.DataFrame], subtype: str) -> dict:
+    advice = _build_equity_advice(view, frame)
+    advice["asset_subtype"] = subtype
+    if not view.get("available") or frame is None or len(frame) < 20:
+        advice["routing_note"] = "资产类别数据不足，已降级为观望"
+        return advice
+    last = frame.iloc[-1]
+    close, ma20, atr = (_finite(last.get(key)) for key in ("收盘", "MA20", "ATR"))
+    weight = float(view.get("weight") or 0)
+    trend = close is not None and ma20 is not None and close >= ma20
+    if weight > .20:
+        advice.update(action="WATCH", action_label="组合暴露偏高需复核",
+                      position_change="0 个百分点")
+    elif trend:
+        advice.update(action="HOLD", action_label="持有", position_change="0 个百分点")
+    else:
+        advice.update(action="WATCH", action_label="趋势偏弱，观察", position_change="0 个百分点")
+    if subtype in (GOLD_ETF, COMMODITY_ETF):
+        label = "黄金" if subtype == GOLD_ETF else "商品"
+        advice["reasons"] = [
+            f"{label}属性资产以趋势、ATR和组合暴露为主，RSI/BOLL不直接触发减仓",
+            f"价格趋势{'偏强' if trend else '偏弱或不可用'}；"
+            + (f"ATR约占价格 {atr / close:.2%}" if close and atr else "ATR数据不足"),
+            "宏观/商品驱动数据未完整接入；需复核同主题资产的组合重叠",
+        ]
+        advice["routing_note"] = "弱化企业/行业事件；做T仅在可信日内字段和足够波动空间下人工评估"
+    else:
+        advice["reasons"] = [
+            "QDII以趋势和ATR为辅助，A股盘中量能不直接解释境外资产价格",
+            f"价格趋势{'偏强' if trend else '偏弱或不可用'}；"
+            + (f"ATR约占价格 {atr / close:.2%}" if close and atr else "ATR数据不足"),
+            "境外市场开闭市、汇率和实时折溢价数据未纳入，相关判断已降级",
+        ]
+        advice["confidence"] = "低"
+        advice["routing_note"] = "需额外核验境外时差、汇率与折溢价；缺失时不作价差归因"
+    return advice
+
+
+def build_rule_advice(view: dict, frame: Optional[pd.DataFrame]) -> dict:
+    """Route deterministic advice by the instrument's persisted subtype."""
+    subtype = subtype_for(view["position"])
+    if subtype == BOND_ETF:
+        return _bond_advice(view, frame, subtype)
+    if subtype in (GOLD_ETF, COMMODITY_ETF, QDII_ETF):
+        return _macro_asset_advice(view, frame, subtype)
+    advice = _build_equity_advice(view, frame)
+    advice["asset_subtype"] = subtype
+    advice["routing_note"] = ("个股可结合事件与主题" if subtype == "STOCK"
+                              else "权益ETF以指数趋势和组合暴露为主，降低企业级事件权重")
+    return advice
 
 
 def build_rule_advices(views: Iterable[dict], stock_data: Dict[str, pd.DataFrame]) -> List[dict]:

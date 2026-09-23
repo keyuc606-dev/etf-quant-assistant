@@ -10,6 +10,8 @@ import pandas as pd
 from ..analysis.indicators import add_all_indicators, get_signals
 from ..analysis.account_advice import build_rule_advices
 from ..analysis.discipline import build_discipline, cash_defense, short_note
+from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
+                             role_label, subtype_for, subtype_label)
 from ..config import ETF_POOL, REPORT_DIR
 from ..data.fetcher import CN_TZ, cached_trade_dates
 
@@ -63,6 +65,8 @@ def _compact_range(value) -> str:
 
 
 def _compact_discipline(discipline: dict) -> str:
+    if discipline.get("asset_subtype") == BOND_ETF:
+        return "债券专用纪律"
     state = discipline.get("discipline_state", "")
     forbidden = discipline.get("forbidden_action", "")
     if state == "冲高滞涨":
@@ -117,8 +121,14 @@ def _render_telegram(pm, views: List[dict], news_result: dict,
             conflict = advice["display_conflict"]
             label = "冲突，人工复核" if conflict else advice["action_label"]
             discipline = "冲突，人工复核" if conflict else _compact_discipline(disciplines[pos.code])
-            lines.append(f"{pos.name}({pos.code})｜{label}｜{discipline}｜置信{advice['confidence']}")
-            lines.append(f"  买 {_compact_range(advice['buy_range'])}｜减 {_compact_range(advice['reduce_range'])}｜失效 {_compact_price(advice['stop'])}")
+            subtype = item["asset_subtype"]
+            lines.append(f"{pos.name}({pos.code})｜{role_label(subtype)}｜仓位{item['weight']:.1%}")
+            lines.append(f"  状态：{label}｜纪律：{discipline}｜置信{advice['confidence']}")
+            if subtype == BOND_ETF:
+                lines.append("  重点：仓位集中度、利率/久期、流动性与折溢价风险")
+                lines.append("  降级：利率环境、久期和折溢价未纳入，仅做账户仓位复核")
+            else:
+                lines.append(f"  买 {_compact_range(advice['buy_range'])}｜减 {_compact_range(advice['reduce_range'])}｜失效 {_compact_price(advice['stop'])}")
             if conflict:
                 lines.append("  理由：建议与纪律冲突，暂停执行暗示")
             elif advice.get("reasons"):
@@ -156,6 +166,12 @@ def _position_views(pm, stock_data: Dict[str, object],
         available = df is not None and not df.empty and pos.current_price > 0
         raw_signals = get_signals(df) if available else []
         signals = [_plain_signal(item) for item in raw_signals]
+        subtype = subtype_for(pos)
+        if subtype == BOND_ETF:
+            signals = []
+        elif subtype in (GOLD_ETF, COMMODITY_ETF, QDII_ETF):
+            signals = [signal for signal in signals
+                       if not any(token in signal for token in ("RSI", "布林带", "KDJ", "量比"))]
         atr_pct = None
         data_date = None
         indicator_values = {}
@@ -178,7 +194,8 @@ def _position_views(pm, stock_data: Dict[str, object],
         unavailable_score = 40 if not available else 0
         observation = theme_observations.get(pos.code, {})
         # 新闻只提供有限的关注度加分，封顶 8 分，不能凭数量压倒账户风险与技术因素。
-        news_score = min(float(observation.get("event_strength", 0) or 0), 8.0)
+        news_cap = 8.0 if subtype == "STOCK" else 4.0 if subtype == "EQUITY_ETF" else 0.0
+        news_score = min(float(observation.get("event_strength", 0) or 0), news_cap)
         score = (weight * 100 + loss_score + len(signals) * 5 + volatility_score
                  + multi_score + unavailable_score + news_score)
         obvious = (
@@ -192,6 +209,7 @@ def _position_views(pm, stock_data: Dict[str, object],
             "atr_pct": atr_pct, "data_date": data_date,
             "indicators": indicator_values, "score": score, "obvious": obvious,
             "theme_observation": observation, "news_score": news_score,
+            "asset_subtype": subtype,
         })
     return views
 
@@ -238,6 +256,7 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     degraded_sources = degraded_sources or []
     for advice in advices:
         view = next(item for item in views if item["position"].code == advice["code"])
+        subtype = view["asset_subtype"]
         issues = []
         statuses = news_result.get("source_status") or {}
         if (news_result.get("degraded") or news_result.get("is_stale")
@@ -252,8 +271,15 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
         frame = stock_data.get(advice["code"])
         if frame is not None and "成交量" in frame and pd.to_numeric(frame.iloc[-1]["成交量"], errors="coerce") <= 0:
             issues.append("成交量异常")
+        if subtype == BOND_ETF:
+            issues.append("利率/久期/折溢价未接入")
+        elif subtype == QDII_ETF:
+            issues.append("境外开闭市/汇率/折溢价未接入")
+        elif subtype in (GOLD_ETF, COMMODITY_ETF):
+            issues.append("宏观/商品驱动数据未完整接入")
         if issues:
-            advice["confidence"] = "低" if len(issues) > 1 or not view["available"] or view["data_date"] != cutoff.isoformat() else "中"
+            advice["confidence"] = "低" if (len(issues) > 1 or not view["available"]
+                or view["data_date"] != cutoff.isoformat() or subtype == QDII_ETF) else "中"
         advice["confidence_note"] = "、".join(issues) if issues else "完整日K与关键指标可用"
     advice_by_code = {item["code"]: item for item in advices}
     cash_note = cash_defense(pm, views)
@@ -353,16 +379,34 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
     for item in focus:
         pos = item["position"]
         advice = advice_by_code[pos.code]
+        subtype = item["asset_subtype"]
+        if subtype == BOND_ETF:
+            lines.extend([
+                f"### {pos.name}（{pos.code}）｜防守资产｜仓位 {item['weight']:.1%}",
+                "",
+                f"- 类型：{subtype_label(subtype)}",
+                f"- 状态：{advice.get('asset_status', advice['action_label'])}",
+                "- 纪律：不按股票超买信号机械减仓；不使用浅套/深套、卖飞或做T作为主纪律",
+                "- 重点：仓位集中度、账户防守资产占比、流动性、折溢价及利率/久期风险",
+                "- 趋势用途：价格趋势与ATR仅用于异常监测，不以压力位触发减仓",
+                f"- 操作倾向：{advice['action_label']}；建议仓位变化：0 个百分点；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
+                "- 数据降级：利率环境、久期和折溢价未纳入，本条仅做账户防守仓位复核",
+                f"- 核心理由：{'；'.join(advice['reasons'][:2])}",
+                "",
+            ])
+            continue
         lines.extend([
             f"### {pos.name}（{pos.code}）",
             "",
-            f"- 类型：{_asset_type(pos)}",
+            f"- 类型：{subtype_label(subtype)}｜角色：{role_label(subtype)}",
             f"- 仓位：{item['weight']:.2%}" if item["available"] else "- 仓位：行情不可用，暂无法准确计算",
             f"- 浮动盈亏：{item['pnl_pct']:+.1%}" if item["pnl_pct"] is not None else "- 浮动盈亏：不可用",
             f"- 主要信号：{'；'.join(item['signals'][:3]) if item['signals'] else '暂未触发明显技术信号'}",
             f"- 状态：{_state_summary(item)}",
-            f"- 近期事件：{_recent_event_text(item['theme_observation'])}",
-            f"- 主题状态：{item['theme_observation'].get('status', '近期公开信息不足，暂不形成行业判断。')}",
+            f"- 近期事件：{_recent_event_text(item['theme_observation'])}" if subtype == "STOCK" else
+            f"- 资产提示：{advice.get('routing_note', '按资产类别规则复核')}",
+            f"- 主题状态：{item['theme_observation'].get('status', '近期公开信息不足，暂不形成行业判断。')}" if subtype in ("STOCK", "EQUITY_ETF") else
+            f"- 资产类别风险：{advice.get('routing_note', '按资产类别规则复核')}",
             f"- 操作倾向：{'冲突，人工复核' if advice['display_conflict'] else advice['action_label']}；建议仓位变化：{'暂停展示' if advice['display_conflict'] else advice['position_change']}；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
             f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
             f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
@@ -402,7 +446,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
         pos = item["position"]
         weight = f"{item['weight']:.2%}" if item["available"] else "不可用"
         pnl = f"{item['pnl_pct']:+.1%}" if item["pnl_pct"] is not None else "不可用"
-        lines.append(f"| {pos.code} | {pos.name} | {_asset_type(pos)} | {weight} | {pnl} |")
+        lines.append(f"| {pos.code} | {pos.name} | {subtype_label(item['asset_subtype'])} | {weight} | {pnl} |")
 
     weak_names = [item["position"].name for item in focus
                   if any(word in signal for signal in item["signals"] for word in ("偏弱", "下轨", "超卖", "波动"))]
@@ -473,7 +517,7 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         current = f"{pos.current_price:.4f}" if item["available"] else "不可用"
         pnl = f"{item['pnl_pct']:+.2%}" if item["pnl_pct"] is not None else "不可用"
         lines.append(
-            f"| {pos.code} | {pos.name} | {_asset_type(pos)} | {int(pos.shares):,} | {pos.cost_price:.4f} | "
+            f"| {pos.code} | {pos.name} | {subtype_label(item['asset_subtype'])} | {int(pos.shares):,} | {pos.cost_price:.4f} | "
             f"{current} | ￥{pos.market_value:,.2f} | {pnl} | {item['weight']:.2%} | "
             f"{item['data_date'] or '-'} |"
         )
@@ -611,7 +655,7 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         "## 能力边界",
         "",
         "- 当前新闻与主题观察只基于公开标题元数据和关键词规则，不读取或保存新闻正文。",
-        "- 当前没有行业景气模型、基金规模、流动性和跟踪误差分析。",
+        "- 当前没有可靠宏观利率、久期、实时折溢价、汇率、境外市场开闭市状态、基金规模和跟踪误差数据；对应资产明确降级，不作推断。",
         "- 当前没有 OpenAI 或多 Agent 综合判断。",
         "- 当前不会自动下单，也不会根据历史亏损自动给出买卖方向。",
         "- 技术指标只描述历史价格状态，不能证明趋势已经反转或预测未来收益。",
@@ -623,6 +667,8 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
 def _state_summary(item: dict) -> str:
     if not item["available"]:
         return "公开行情暂不可用，今天无法形成可靠判断。"
+    if item.get("asset_subtype") == BOND_ETF:
+        return "防守资产仅按仓位、波动与可得流动性数据复核；不使用股票式超买/压力位结论。"
     signals = item["signals"]
     if len(signals) >= 2:
         return "多个技术条件同时触发，值得优先复核，但信号不等于交易结论。"

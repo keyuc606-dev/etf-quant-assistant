@@ -172,7 +172,7 @@ class MobileStockAccountTest(unittest.TestCase):
         """)
         connection.close()
         repository = SQLiteTradingRepository(path)
-        self.assertEqual(repository.get_schema_version(), 2)
+        self.assertEqual(repository.get_schema_version(), 3)
         reopened = sqlite3.connect(path)
         try:
             opening_columns = {row[1] for row in reopened.execute("PRAGMA table_info(opening_positions)")}
@@ -181,6 +181,8 @@ class MobileStockAccountTest(unittest.TestCase):
             reopened.close()
         self.assertIn("asset_type", opening_columns)
         self.assertIn("asset_type", execution_columns)
+        self.assertIn("asset_subtype", opening_columns)
+        self.assertIn("asset_subtype", execution_columns)
 
 
 if __name__ == "__main__":

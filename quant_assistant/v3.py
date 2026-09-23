@@ -10,6 +10,7 @@ from .advice_performance import (RULE_VERSION, append_immutable, correlate_execu
 from .cloud_state import CloudStateStore
 from .config import REPORT_DIR
 from .analysis.discipline import sale_chase_alert, short_note, t_opportunity
+from .asset_routing import BOND_ETF, QDII_ETF, role_label, subtype_for
 from .data.fetcher import CN_TZ, DataFetcher
 from .models import Market
 from .portfolio.holdings import PortfolioManager
@@ -138,17 +139,36 @@ def _price_text(value):
     return f"{value:.3f}" if value < 10 else f"{value:.2f}"
 
 
-def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = None) -> dict:
+def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = None,
+                   asset_subtype: str | None = None) -> dict:
     price = quote["price"]
     flags = []
+    subtype = asset_subtype or (advice or {}).get("asset_subtype")
     opened, previous = _positive(quote.get("open")), _positive(quote.get("previous_close"))
     if opened and previous:
         gap = (opened / previous - 1) * 100
         if abs(gap) >= 3:
             flags.append(f"向{'上' if gap > 0 else '下'}跳空{abs(gap):.1f}%")
-    volume_note = _volume_note(quote, avg_volume)
+    volume_note = ("A股盘中成交量逻辑不适用于QDII，需结合境外市场时段复核"
+                   if subtype == QDII_ETF else _volume_note(quote, avg_volume))
     if volume_note == "成交量异常":
         flags.append(volume_note)
+    if subtype == BOND_ETF:
+        abnormal = abs(quote.get("change_pct") or 0) >= .8 or volume_note == "成交量异常"
+        if abs(quote.get("change_pct") or 0) >= .8:
+            flags.append("债券ETF异常波动")
+        return {
+            "status": "异常波动/流动性需复核" if abnormal else "防守资产盘中正常",
+            "flags": flags,
+            "rule": "仅复核异常波动、流动性、折溢价与防守仓位；不使用股票买卖区",
+            "priority": 2 if abnormal else 95,
+            "distance": "债券ETF不使用股票压力位/买卖区",
+            "distance_atr": math.inf,
+            "group": "防守资产异常复核" if abnormal else "防守资产观察",
+            "volume_note": volume_note,
+        }
+    if subtype == QDII_ETF:
+        flags.append("境外市场开闭市、汇率与折溢价状态未核验")
     if advice is None:
         if abs(quote.get("change_pct") or 0) >= 5:
             flags.append("异常波动")
@@ -213,9 +233,12 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             degraded.append(f"{pos.name}（{pos.code}）：实时行情不可用")
             continue
         advice = morning.get(pos.code)
-        verdict = classify_quote(advice, quote, advice.get("reference_volume") if advice else None)
+        subtype = (advice or {}).get("asset_subtype") or subtype_for(pos)
+        verdict = classify_quote(advice, quote,
+                                 advice.get("reference_volume") if advice else None,
+                                 subtype)
         rows.append((verdict["priority"], verdict["distance_atr"], pos.code,
-                     pos, quote, advice, verdict))
+                     pos, quote, advice, verdict, subtype))
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
     if quality is not None:
         quality.update({"morning_advice": bool(morning), "fresh_provisional": bool(rows),
@@ -224,26 +247,29 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
     if not morning:
         lines.append("今日09:20建议不存在，以下仅为持仓盘中风险快照。")
     focus_count = min(5, max(3, sum(row[0] < 90 for row in rows)))
-    groups = sorted({row[-1]["group"] for row in rows[:focus_count]},
+    groups = sorted({row[-2]["group"] for row in rows[:focus_count]},
                     key=lambda group: min(row[0] for row in rows[:focus_count]
-                                          if row[-1]["group"] == group))
+                                          if row[-2]["group"] == group))
     for group in groups:
-        selected = [row for row in rows[:focus_count] if row[-1]["group"] == group]
+        selected = [row for row in rows[:focus_count] if row[-2]["group"] == group]
         if not selected:
             continue
         lines.append(f"【{group}】")
-        for _, _, _, pos, quote, advice, verdict in selected:
+        for _, _, _, pos, quote, advice, verdict, subtype in selected:
             buy = advice.get("buy_zone") if advice else None
             reduce = advice.get("reduce_zone") if advice else None
             stop = _positive(advice.get("invalidation_price")) if advice else None
-            zone = (f"买{_price_text(buy[0])}–{_price_text(buy[1])}｜"
+            zone = ("债券ETF不展示股票式买入区/减仓区/压力位" if subtype == BOND_ETF else
+                    f"买{_price_text(buy[0])}–{_price_text(buy[1])}｜"
                     f"减{_price_text(reduce[0])}–{_price_text(reduce[1])}｜失效{_price_text(stop)}"
                     if buy and reduce and stop else "早间关键区间不完整")
             discipline = advice.get("discipline") if advice else None
             forbidden = (discipline or {}).get("forbidden_action", "")
             conflict = verdict["status"] in ("已进入买入区", "接近买入区") and any(
                 word in forbidden for word in ("禁止越跌越补", "禁止补仓", "禁止加仓", "禁止情绪化追回"))
-            if conflict:
+            if subtype == BOND_ETF:
+                reminder = "债券专用纪律：不按股票超买/压力位机械减仓，不做T"
+            elif conflict:
                 reminder = "冲突，人工复核"
             elif verdict["status"] == "已失效":
                 reminder = "停止早间买入计划，人工复核风险"
@@ -255,7 +281,7 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             else:
                 reminder = verdict["rule"]
             change = quote.get("change_pct") or 0
-            lines.append(f"{pos.name} {pos.code}｜{_price_text(quote['price'])} {change:+.2f}%｜{verdict['status']}")
+            lines.append(f"{pos.name} {pos.code}｜{role_label(subtype)}｜{_price_text(quote['price'])} {change:+.2f}%｜{verdict['status']}")
             lines.append(zone)
             gaps = [flag for flag in verdict["flags"] if "跳空" in flag]
             lines.append(f"{verdict['distance']}｜纪律：{reminder}" +
@@ -263,7 +289,8 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             if detail is not None:
                 atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
                 t_note = (t_opportunity({"buy_range": buy, "reduce_range": reduce,
-                                         "asset_type": advice.get("asset_type")}, atr, quote)
+                                         "asset_type": advice.get("asset_type"),
+                                         "asset_subtype": subtype}, atr, quote)
                           if advice else "不建议做T：无早间建议")
                 detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '未知源')}）；"
                               f"成交量 {quote.get('volume', 0):,.0f} 手；成交额 ￥{quote.get('amount', 0):,.0f}\n"
@@ -271,13 +298,14 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                               f"{', '.join(verdict['flags']) or '无额外风险标记'}。")
     if len(rows) > focus_count:
         others = rows[focus_count:]
-        lines.append("其余：" + "；".join(f"{pos.name}{pos.code} {verdict['status']}" for _, _, _, pos, _, _, verdict in others))
+        lines.append("其余：" + "；".join(f"{pos.name}{pos.code} {verdict['status']}" for _, _, _, pos, _, _, verdict, _ in others))
         if detail is not None:
-            for _, _, _, pos, quote, advice, verdict in others:
+            for _, _, _, pos, quote, advice, verdict, subtype in others:
                 atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
                 t_note = (t_opportunity({"buy_range": advice.get("buy_zone"),
                                          "reduce_range": advice.get("reduce_zone"),
-                                         "asset_type": advice.get("asset_type")}, atr, quote)
+                                         "asset_type": advice.get("asset_type"),
+                                         "asset_subtype": subtype}, atr, quote)
                           if advice else "不建议做T：无早间建议")
                 detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}"
                               f"（{quote.get('source', '未知源')}）；成交量 {quote.get('volume', 0):,.0f} 手；"

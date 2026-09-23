@@ -3,6 +3,9 @@
 import datetime as dt
 import math
 
+from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
+                             subtype_for)
+
 
 VERSION = "discipline-v1"
 
@@ -64,6 +67,11 @@ def cash_defense(pm, views):
 
 def t_opportunity(advice, atr, quote=None):
     """Only fresh intraday high/low can establish a provisional T opportunity."""
+    subtype = advice.get("asset_subtype")
+    if subtype == BOND_ETF:
+        return "资产类别专用纪律：债券ETF默认不做T"
+    if subtype == QDII_ETF and not (quote or {}).get("overseas_market_status"):
+        return "不建议做T：境外市场开闭市、汇率或价差状态不足"
     if not quote or not quote.get("provisional"):
         return "不建议做T：缺少可信日内高低点，无法判断空间"
     price, high, low, opened, previous = (_number(quote.get(k)) for k in
@@ -90,6 +98,22 @@ def build_discipline(view, frame, advice, cash_note, executions=None,
             "reentry_condition": "待趋势、支撑、量能和风险收益重新确认",
             "t_opportunity": "不建议做T：缺少可信日内高低点，无法判断空间",
             "cash_defense_note": cash_note, "reason": "行情或指标不足", "sale_status": "unknown"}
+    subtype = subtype_for(pos)
+    base["asset_subtype"] = subtype
+    if subtype == BOND_ETF:
+        weight = float(view.get("weight") or 0)
+        state = ("防守仓位偏高需复核" if weight > .20 else
+                 "防守仓位偏低可关注" if weight < .08 else "防守仓位正常")
+        base.update(
+            discipline_state="资产类别专用纪律",
+            discipline_action=state if state != "防守仓位正常" else "持有；复核防守资产角色",
+            forbidden_action="禁止用RSI超买、BOLL上轨、压力位、浅套/深套或卖飞标签机械减仓",
+            reentry_condition="仅在账户防守占比、流动性、折溢价和利率/久期风险可核验后复核",
+            t_opportunity="资产类别专用纪律：债券ETF默认不做T",
+            reason=(f"{state}；宏观利率、久期和折溢价数据未完整接入，"
+                    "价格趋势仅用于异常监测"),
+        )
+        return base
     if not view.get("available") or frame is None or len(frame) < 20:
         return base
     last = frame.iloc[-1]
@@ -99,6 +123,19 @@ def build_discipline(view, frame, advice, cash_note, executions=None,
     rsi, macd, k, d = (_number(last.get(key)) for key in ("RSI14", "MACD", "K", "D"))
     boll_up, volume_ratio = (_number(last.get(key)) for key in ("BOLL_UP", "量比"))
     if not price or price <= 0 or not atr or atr <= 0 or not ma20:
+        return base
+    if subtype in (GOLD_ETF, COMMODITY_ETF, QDII_ETF):
+        label = {GOLD_ETF: "黄金", COMMODITY_ETF: "商品", QDII_ETF: "QDII"}[subtype]
+        trend = "偏强" if price >= ma20 else "偏弱"
+        base.update(
+            discipline_state="资产类别专用纪律",
+            discipline_action=f"{label}属性按趋势、ATR和组合暴露人工复核（当前趋势{trend}）",
+            forbidden_action="禁止仅凭股票式RSI/BOLL、成本盈亏或A股量能给出操作结论",
+            reentry_condition="趋势、波动空间、组合暴露及资产类别专属风险均可核验后再评估",
+            t_opportunity=t_opportunity({**advice, "asset_subtype": subtype}, atr, quote),
+            reason=("宏观/商品属性和主题重叠优先" if subtype != QDII_ETF else
+                    "境外时差、汇率、开闭市与折溢价需优先核验"),
+        )
         return base
     weak = price < ma20 and (ma5 is None or ma5 < ma20) and (macd is None or macd <= 0)
     broken = advice.get("stop") is not None and price < advice["stop"]
@@ -113,7 +150,8 @@ def build_discipline(view, frame, advice, cash_note, executions=None,
     reentry_ok = strong and near_support and risk_reward and not broken
     base["reentry_condition"] = ("已进入规则买入区且趋势、量能和风险收益确认；仅重新人工评估"
                                  if reentry_ok else "仅回踩规则买入区、重新企稳且量能与风险收益确认后评估")
-    base["t_opportunity"] = t_opportunity({**advice, "asset_type": pos.asset_type}, atr, quote)
+    base["t_opportunity"] = t_opportunity(
+        {**advice, "asset_type": pos.asset_type, "asset_subtype": subtype}, atr, quote)
     pnl = view.get("pnl_pct")
     sale = _recent_sale(pos.code, executions, as_of)
     if sale:
@@ -153,6 +191,10 @@ def build_discipline(view, frame, advice, cash_note, executions=None,
 
 
 def short_note(discipline):
+    if discipline.get("asset_subtype") == BOND_ETF:
+        return "不按股票超买信号机械减仓；复核防守占比、流动性、折溢价和利率风险。"
+    if discipline.get("discipline_state") == "资产类别专用纪律":
+        return discipline["discipline_action"] + "。"
     state = discipline["discipline_state"]
     if state == "卖飞/减仓后续涨":
         return f"卖飞后禁止追回；{discipline['reentry_condition']}。"

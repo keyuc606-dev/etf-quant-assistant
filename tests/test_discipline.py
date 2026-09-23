@@ -84,7 +84,7 @@ def test_cash_defense_and_history_label():
               "stock_data": {}, "disciplines": {POS.code: d}}
     row = make_records(report, NOW, "test")[0]
     assert row["discipline_version"] == "discipline-v1"
-    assert row["rule_version"] == "v3-advice-1"
+    assert row["rule_version"] == "asset-routing-v1"
 
 
 def test_intraday_displays_discipline_and_no_stale_price():

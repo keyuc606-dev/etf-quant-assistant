@@ -8,7 +8,7 @@ from ..config import DATA_DIR
 from .repository import TradingRepository
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_DATABASE_PATH = DATA_DIR / "trading.sqlite3"
 
 
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS opening_positions (
     name TEXT NOT NULL,
     market TEXT NOT NULL,
     asset_type TEXT NOT NULL DEFAULT 'ETF' CHECK (asset_type IN ('ETF', 'STOCK')),
+    asset_subtype TEXT NOT NULL DEFAULT '',
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     cost_price REAL NOT NULL CHECK (cost_price >= 0),
     current_price REAL NOT NULL CHECK (current_price >= 0),
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS executions (
     side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
     code TEXT NOT NULL,
     asset_type TEXT NOT NULL DEFAULT 'ETF' CHECK (asset_type IN ('ETF', 'STOCK')),
+    asset_subtype TEXT NOT NULL DEFAULT '',
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     price REAL NOT NULL CHECK (price > 0),
     fee REAL NOT NULL CHECK (fee >= 0),
@@ -113,12 +115,20 @@ class SQLiteTradingRepository(TradingRepository):
                 connection.execute(
                     "ALTER TABLE opening_positions ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'ETF'"
                 )
+            if "asset_subtype" not in opening_columns:
+                connection.execute(
+                    "ALTER TABLE opening_positions ADD COLUMN asset_subtype TEXT NOT NULL DEFAULT ''"
+                )
             execution_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(executions)")
             }
             if "asset_type" not in execution_columns:
                 connection.execute(
                     "ALTER TABLE executions ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'ETF'"
+                )
+            if "asset_subtype" not in execution_columns:
+                connection.execute(
+                    "ALTER TABLE executions ADD COLUMN asset_subtype TEXT NOT NULL DEFAULT ''"
                 )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_version(version, applied_at) "
@@ -166,7 +176,7 @@ class SQLiteTradingRepository(TradingRepository):
         return [
             {
                 "code": row["code"], "name": row["name"], "market": row["market"],
-                "asset_type": row["asset_type"],
+                "asset_type": row["asset_type"], "asset_subtype": row["asset_subtype"],
                 "shares": row["quantity"], "cost_price": row["cost_price"],
                 "current_price": row["current_price"], "sector": row["sector"],
                 "last_updated": row["last_updated"], "pe": row["pe"], "pb": row["pb"],
@@ -186,13 +196,13 @@ class SQLiteTradingRepository(TradingRepository):
                 connection.execute(
                     """
                     INSERT INTO opening_positions(
-                        code, name, market, asset_type, quantity, cost_price, current_price,
+                        code, name, market, asset_type, asset_subtype, quantity, cost_price, current_price,
                         sector, last_updated, pe, pb, roe, market_cap
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         position["code"], position["name"], position["market"],
-                        position.get("asset_type", "ETF"),
+                        position.get("asset_type", "ETF"), position.get("asset_subtype", ""),
                         position["shares"], position["cost_price"], position["current_price"],
                         position.get("sector", ""), position.get("last_updated"),
                         position.get("pe", 0.0), position.get("pb", 0.0),
@@ -205,13 +215,14 @@ class SQLiteTradingRepository(TradingRepository):
             connection.execute(
                 """
                 INSERT INTO executions(
-                    execution_id, external_id, side, code, asset_type, quantity, price, fee,
+                    execution_id, external_id, side, code, asset_type, asset_subtype, quantity, price, fee,
                     executed_at, source, related_plan_id, note, realized_pnl, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     execution["execution_id"], execution.get("external_id"), execution["side"],
-                    execution["code"], execution.get("asset_type", "ETF"), execution["quantity"],
+                    execution["code"], execution.get("asset_type", "ETF"),
+                    execution.get("asset_subtype", ""), execution["quantity"],
                     execution["price"], execution["fee"],
                     execution["executed_at"], execution["source"], execution.get("related_plan_id"),
                     execution.get("note"), execution.get("realized_pnl"), execution["created_at"],

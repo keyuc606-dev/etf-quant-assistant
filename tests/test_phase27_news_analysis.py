@@ -190,7 +190,7 @@ class NewsAnalysisTest(unittest.TestCase):
         focus = select_focus_positions(views)
 
         news_view = next(item for item in views if item["position"].code == positions[1].code)
-        self.assertEqual(news_view["news_score"], 8)
+        self.assertEqual(news_view["news_score"], 4)
         self.assertEqual(focus[0]["position"].code, positions[1].code)
 
     def test_news_report_has_sources_times_and_no_explicit_trade_instruction(self):

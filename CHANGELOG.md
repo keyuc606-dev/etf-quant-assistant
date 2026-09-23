@@ -1,5 +1,13 @@
 # 版本说明
 
+## 未发布 — asset-routing-v1 资产分类与分策略报告
+
+- 新增 `asset_subtype`：`STOCK`、`EQUITY_ETF`、`BOND_ETF`、`GOLD_ETF`、`COMMODITY_ETF`、`QDII_ETF`；基于持久化字段、代码、名称和现有账户元数据离线识别，首次买入同步写入持仓与成交台账。
+- 债券 ETF 改用防守资产仓位、异常波动和可得流动性信息复核；关闭股票式 RSI/BOLL/压力位减仓、浅套/深套、卖飞和做T主纪律。`159649 国开债ETF` 固化回归。
+- 黄金/商品以趋势、ATR、组合暴露和主题重叠为主；QDII 增加境外时差、汇率、开闭市和折溢价缺失降级，不套用 A 股盘中量能解释。
+- 09:20 晨报、14:30 盘中报告、discipline-v1 和建议历史统一按子类型路由；建议记录规则版本升级为 `asset-routing-v1`。
+- SQLite schema 升级至 v3，旧库自动增加 `asset_subtype`；原 allocation、rebalance、backtest 规则与建议 outcome 定义不变，无自动交易。
+
 ## v3.1 — 晨报日K完整性与 Telegram 紧凑版
 
 - 09:20 晨报先截断到最近完整交易日，再计算全部指标和规则价格；报告分列报告日期、技术行情截止、新闻截止和完整性状态。

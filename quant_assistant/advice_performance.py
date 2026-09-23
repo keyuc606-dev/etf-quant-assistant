@@ -10,12 +10,13 @@ from collections import defaultdict
 import pandas as pd
 
 from .data.fetcher import CN_TZ
+from .asset_routing import ROUTING_VERSION, subtype_for
 
 
 WINDOWS = (5, 10, 20)
 STAT_VERSION = 1
 MIN_SAMPLE = 10
-RULE_VERSION = "v3-advice-1"
+RULE_VERSION = ROUTING_VERSION
 
 
 def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[dict]:
@@ -39,6 +40,7 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
             "asset_type": pos.asset_type or ("ETF" if pos.market.name == "ETF" else "STOCK"),
+            "asset_subtype": advice.get("asset_subtype") or subtype_for(pos),
             "market": pos.market.name, "action_tendency": advice["action"],
             # JSON 持久化会把 tuple 转为 list；记录在首次比较前就统一为 JSON 形态。
             "buy_zone": list(advice["buy_range"]) if advice["buy_range"] is not None else None,

@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from ..models import StockPosition, Market
 from ..config import DATA_DIR
+from ..asset_routing import classify_asset_subtype
 
 
 MARKET_MAP = {
@@ -36,6 +37,10 @@ class PortfolioManager:
             "cost_price": p.cost_price,
             "current_price": p.current_price,
             "asset_type": p.asset_type or ("ETF" if p.market == Market.ETF else "STOCK"),
+            "asset_subtype": classify_asset_subtype(
+                p.code, p.name, p.market, p.asset_type,
+                explicit=p.asset_subtype,
+            ),
             "sector": p.sector,
             "last_updated": p.last_updated.isoformat() if p.last_updated else None,
             "pe": p.pe,
@@ -54,6 +59,7 @@ class PortfolioManager:
         last_updated = None
         if d.get("last_updated"):
             last_updated = datetime.datetime.fromisoformat(d["last_updated"])
+        asset_type = d.get("asset_type") or ("ETF" if market == Market.ETF else "STOCK")
         return StockPosition(
             code=d["code"],
             name=d["name"],
@@ -61,7 +67,11 @@ class PortfolioManager:
             shares=d["shares"],
             cost_price=d["cost_price"],
             current_price=d["current_price"],
-            asset_type=d.get("asset_type") or ("ETF" if market == Market.ETF else "STOCK"),
+            asset_type=asset_type,
+            asset_subtype=classify_asset_subtype(
+                d["code"], d["name"], market, asset_type,
+                explicit=d.get("asset_subtype", ""),
+            ),
             sector=d.get("sector", ""),
             last_updated=last_updated,
             pe=d.get("pe", 0.0),

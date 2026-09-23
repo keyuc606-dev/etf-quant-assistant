@@ -57,6 +57,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 |---|---|
 | `quant_assistant/data/fetcher.py` | 唯一联网入口（akshare），缓存与离线降级 |
 | `quant_assistant/portfolio/` | 持仓、风控规则、告警、操作建议（完全离线） |
+| `quant_assistant/asset_routing.py` | 持仓资产子类型识别与展示角色（完全离线） |
 | `quant_assistant/trading/` | 成交业务、Repository 接口与本地 SQLite 实现（完全离线） |
 | `quant_assistant/backtest/` | 回测引擎、指标计算、HTML 报告 |
 | `quant_assistant/screening/` | 观察池、过滤器、评分 |
@@ -69,6 +70,8 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 09:20 日报是“前一交易日收盘 + 隔夜新闻的当天作战计划”，不是实时盘中建议。规则层产生全部价格与仓位数字；可选 OpenAI provider 仅压缩文字和排序。GitHub Secret `OPENAI_API_KEY` 未配置或调用失败时自动降级为纯规则版。
 
 v3 在 09:20 推送前，把每个持仓的原始建议追加到私有状态仓库 `state/account-state.json` 的 `advice_records`；同一 advice_id 重试不会覆盖首次记录。`rule_version` 标识规则口径，`code_commit` 保留实际运行 commit。建议日志含真实账户成本、仓位等敏感信息，只能留在私有状态仓库。20 日结算统计仅用建议日之后完整交易日的 OHLC；当天同时触及目标和失效时记为顺序不明，不武断判胜。公开行情的前复权数据可能重算，历史重算结果也可能随数据源修订而变化。成交只有显式 `related_plan_id=advice_id` 时才归因，否则为 unknown。样本不足 10 条时不判断效果。
+
+账户持仓另存 `asset_subtype`，当前支持 `STOCK`、`EQUITY_ETF`、`BOND_ETF`、`GOLD_ETF`、`COMMODITY_ETF`、`QDII_ETF`。缺失字段由代码、名称和现有元数据离线补判；09:20、14:30、discipline-v1 和建议历史统一使用该分类。债券 ETF 不使用股票式 RSI/BOLL/压力位减仓、浅套/深套、卖飞或做T主纪律。宏观利率、久期、实时折溢价、汇率或境外开闭市状态拿不到时必须明确降级，不得从技术指标编造。
 
 14:30 工作流只读当日 09:20 建议和私有账户快照，读取带当日更新时间的临时报价；盘中数据带 `provisional`，不写入日线缓存，不运行周度 allocation/rebalance，不自动下单。无当日建议时改为持仓风险快照。A 股盘中报价用新浪带时间戳的单标的免费接口；ETF 优先复用东财快照的更新时间；失败时再尝试新浪和腾讯免费接口。报价无法验证为当日新鲜数据时只报告降级，不使用昨收冒充。盘中成交量统一以“手”表示。
 

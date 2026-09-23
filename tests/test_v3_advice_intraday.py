@@ -16,7 +16,7 @@ from quant_assistant.models import Market
 from quant_assistant.v3 import build_intraday, classify_quote, recalculate, save_morning_advice
 
 
-def record(version="v3-advice-1"):
+def record(version=RULE_VERSION):
     return {"advice_id": "a1", "as_of": "2026-01-05", "code": "510300",
             "market": "ETF", "rule_version": version, "action_tendency": "HOLD",
             "reference_close": 100, "target_price": 110, "invalidation_price": 90,
@@ -51,13 +51,13 @@ def test_summary_sample_warning_version_filter_and_recompute():
     first = record()
     second = {**record("old"), "advice_id": "old"}
     outcomes = [evaluate(r, frame(), dt.date(2026, 2, 10)) for r in (first, second)]
-    summary = summarize([first, second], outcomes, "v3-advice-1")
+    summary = summarize([first, second], outcomes, RULE_VERSION)
     assert summary["sample_count"] == summary["settled_count"] == 1
     assert summary["insufficient_sample"]
     rendered = render_summary(summary)
     assert "样本不足" in rendered
     assert "20日观察窗口（已结算样本）：目标先触及" in rendered
-    assert summary == summarize([first, second], outcomes, "v3-advice-1")
+    assert summary == summarize([first, second], outcomes, RULE_VERSION)
     assert append_immutable([first], [first]) == [first]
     with pytest.raises(ValueError, match="拒绝覆盖"):
         append_immutable([first], [{**first, "target_price": 200}])

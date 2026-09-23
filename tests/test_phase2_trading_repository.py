@@ -173,7 +173,7 @@ class TradingRepositoryTest(unittest.TestCase):
             with repository.transaction():
                 repository.save_opening_snapshot(account, positions)
 
-            self.assertEqual(repository.get_schema_version(), 2)
+            self.assertEqual(repository.get_schema_version(), 3)
             self.assertEqual(repository.load_opening_account()["cash"], 10000.0)
             self.assertEqual(repository.load_opening_positions()[0]["shares"], 1000)
 
@@ -219,8 +219,8 @@ class TradingRepositoryTest(unittest.TestCase):
 
             reopened = SQLiteTradingRepository(path)
 
-            self.assertEqual(before_version, 2)
-            self.assertEqual(reopened.get_schema_version(), 2)
+            self.assertEqual(before_version, 3)
+            self.assertEqual(reopened.get_schema_version(), 3)
             self.assertEqual(reopened.get_execution_by_external_id("legacy-ext")["execution_id"], "legacy-exec")
 
 
