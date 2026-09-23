@@ -10,6 +10,8 @@ from .advice_performance import (RULE_VERSION, append_immutable, correlate_execu
 from .cloud_state import CloudStateStore
 from .config import REPORT_DIR
 from .analysis.discipline import sale_chase_alert, short_note, t_opportunity
+from .analysis.ma_discipline import (compact_ma_note, intraday_ma_discipline,
+                                     intraday_priority_adjustment)
 from .asset_routing import BOND_ETF, QDII_ETF, role_label, subtype_for
 from .data.fetcher import CN_TZ, DataFetcher
 from .models import Market
@@ -237,6 +239,11 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
         verdict = classify_quote(advice, quote,
                                  advice.get("reference_volume") if advice else None,
                                  subtype)
+        if advice:
+            ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
+            ma_result = intraday_ma_discipline(advice, ma_quote, verdict["status"])
+            verdict["ma_discipline"] = ma_result
+            verdict["priority"] = intraday_priority_adjustment(verdict, ma_result)
         rows.append((verdict["priority"], verdict["distance_atr"], pos.code,
                      pos, quote, advice, verdict, subtype))
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -264,22 +271,35 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                     f"减{_price_text(reduce[0])}–{_price_text(reduce[1])}｜失效{_price_text(stop)}"
                     if buy and reduce and stop else "早间关键区间不完整")
             discipline = advice.get("discipline") if advice else None
+            ma_result = verdict.get("ma_discipline") or {}
             forbidden = (discipline or {}).get("forbidden_action", "")
             conflict = verdict["status"] in ("已进入买入区", "接近买入区") and any(
                 word in forbidden for word in ("禁止越跌越补", "禁止补仓", "禁止加仓", "禁止情绪化追回"))
+            conflict = conflict or (verdict["status"] in ("已进入买入区", "接近买入区")
+                                    and ma_result.get("ma_conflict_flag", False))
             if subtype == BOND_ETF:
                 reminder = "债券专用纪律：不按股票超买/压力位机械减仓，不做T"
             elif conflict:
-                reminder = "冲突，人工复核"
+                reminder = f"信号冲突，人工复核（{ma_result.get('ma_state', '均线纪律')}）"
+            elif (verdict["status"] in ("已失效", "接近失效位")
+                  and "MA20" in ma_result.get("ma_state", "")):
+                reminder = "接近失效 + MA20趋势破坏：禁止加仓，优先减仓复核"
             elif verdict["status"] == "已失效":
                 reminder = "停止早间买入计划，人工复核风险"
+            elif (verdict["status"] in ("已进入减仓区", "已超过减仓区")
+                  and "过热" in ma_result.get("ma_state", "")):
+                reminder = "进入减仓区 + MA5乖离过热：分批锁利复核"
+            elif (verdict["status"] == "跌破买入区但未失效"
+                  and ma_result.get("ma_state") == "MA10跌破"):
+                reminder = "跌破买入区 + MA10失守：风险收缩/减仓观察"
             elif discipline and sale_chase_alert(pos.code, executions, now, quote["price"],
                     (advice.get("technical_features") or {}).get("ATR")):
                 reminder = "卖出后禁止情绪化追回"
             elif executions is None and (discipline or {}).get("discipline_state") == "卖飞/减仓后续涨":
                 reminder = short_note(discipline)
             else:
-                reminder = verdict["rule"]
+                reminder = (f"{verdict['rule']}；均线：{compact_ma_note(ma_result)}"
+                            if ma_result else verdict["rule"])
             change = quote.get("change_pct") or 0
             lines.append(f"{pos.name} {pos.code}｜{role_label(subtype)}｜{_price_text(quote['price'])} {change:+.2f}%｜{verdict['status']}")
             lines.append(zone)
@@ -295,12 +315,14 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                 detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}（{quote.get('source', '未知源')}）；"
                               f"成交量 {quote.get('volume', 0):,.0f} 手；成交额 ￥{quote.get('amount', 0):,.0f}\n"
                               f"{zone}；{verdict['distance']}；{verdict['volume_note']}；{t_note}；"
+                              f"均线纪律：{compact_ma_note(ma_result) if ma_result else '不可用'}；"
                               f"{', '.join(verdict['flags']) or '无额外风险标记'}。")
     if len(rows) > focus_count:
         others = rows[focus_count:]
         lines.append("其余：" + "；".join(f"{pos.name}{pos.code} {verdict['status']}" for _, _, _, pos, _, _, verdict, _ in others))
         if detail is not None:
             for _, _, _, pos, quote, advice, verdict, subtype in others:
+                ma_result = verdict.get("ma_discipline") or {}
                 atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
                 t_note = (t_opportunity({"buy_range": advice.get("buy_zone"),
                                          "reduce_range": advice.get("reduce_zone"),
@@ -310,7 +332,8 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                 detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of', '时间未标注')}"
                               f"（{quote.get('source', '未知源')}）；成交量 {quote.get('volume', 0):,.0f} 手；"
                               f"成交额 ￥{quote.get('amount', 0):,.0f}\n{verdict['status']}；"
-                              f"{verdict['distance']}；{verdict['volume_note']}；{t_note}。")
+                              f"{verdict['distance']}；{verdict['volume_note']}；{t_note}；"
+                              f"均线纪律：{compact_ma_note(ma_result) if ma_result else '不可用'}。")
     if degraded:
         lines.append("实时数据不可用，已降级；未用昨收冒充盘中价：" + "；".join(degraded))
     if not rows:

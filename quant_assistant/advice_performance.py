@@ -11,6 +11,7 @@ import pandas as pd
 
 from .data.fetcher import CN_TZ
 from .asset_routing import ROUTING_VERSION, subtype_for
+from .analysis.ma_discipline import VERSION as MA_DISCIPLINE_VERSION
 
 
 WINDOWS = (5, 10, 20)
@@ -23,6 +24,7 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
     as_of = generated_at.astimezone(CN_TZ).date().isoformat()
     by_code = {a["code"]: a for a in reports["advices"]}
     disciplines = reports.get("disciplines", {})
+    ma_disciplines = reports.get("ma_disciplines", {})
     records = []
     for view in reports["views"]:
         pos = view["position"]
@@ -35,7 +37,11 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             sample = sample[sample > 0].dropna()
             # A single prior session is too noisy to call today's volume abnormal.
             volume = float(sample.mean()) if len(sample) >= 5 else None
-        identity = f"{as_of}:{pos.code}:{RULE_VERSION}"
+        # The MA layer changes the audited advice facts but not outcome semantics.
+        # Include its own version in the immutable identity so a same-day manual
+        # validation can coexist with a pre-deployment record instead of trying
+        # to overwrite it.
+        identity = f"{as_of}:{pos.code}:{RULE_VERSION}:{MA_DISCIPLINE_VERSION}"
         records.append({
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
@@ -55,6 +61,15 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "technical_features": view["indicators"],
             "discipline_version": disciplines.get(pos.code, {}).get("version"),
             "discipline": disciplines.get(pos.code),
+            "ma_discipline_version": ma_disciplines.get(pos.code, {}).get(
+                "version", MA_DISCIPLINE_VERSION),
+            "ma_state": ma_disciplines.get(pos.code, {}).get("ma_state"),
+            "ma_action_hint": ma_disciplines.get(pos.code, {}).get("ma_action_hint"),
+            "ma_forbidden_action": ma_disciplines.get(pos.code, {}).get("ma_forbidden_action"),
+            "ma_confirmation": ma_disciplines.get(pos.code, {}).get("ma_confirmation"),
+            "ma_conflict_flag": ma_disciplines.get(pos.code, {}).get("ma_conflict_flag", False),
+            "ma_reason": ma_disciplines.get(pos.code, {}).get("ma_reason"),
+            "ma_discipline": ma_disciplines.get(pos.code),
         })
     return records
 

@@ -10,6 +10,7 @@ import pandas as pd
 from ..analysis.indicators import add_all_indicators, get_signals
 from ..analysis.account_advice import build_rule_advices
 from ..analysis.discipline import build_discipline, cash_defense, short_note
+from ..analysis.ma_discipline import build_ma_discipline, compact_ma_note
 from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
                              role_label, subtype_for, subtype_label)
 from ..config import ETF_POOL, REPORT_DIR
@@ -82,7 +83,8 @@ def _compact_discipline(discipline: dict) -> str:
 
 def _render_telegram(pm, views: List[dict], news_result: dict,
                      generated_at: datetime.datetime, advice_by_code: dict,
-                     disciplines: dict, degraded_sources: List[str]) -> str:
+                     disciplines: dict, ma_disciplines: dict,
+                     degraded_sources: List[str]) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     pnl = pm.total_market_value - total_cost
     cash_ratio = pm.cash / pm.total_assets if pm.total_assets else 0
@@ -124,6 +126,7 @@ def _render_telegram(pm, views: List[dict], news_result: dict,
             subtype = item["asset_subtype"]
             lines.append(f"{pos.name}({pos.code})｜{role_label(subtype)}｜仓位{item['weight']:.1%}")
             lines.append(f"  状态：{label}｜纪律：{discipline}｜置信{advice['confidence']}")
+            lines.append(f"  均线纪律：{compact_ma_note(ma_disciplines[pos.code])}")
             if subtype == BOND_ETF:
                 lines.append("  重点：仓位集中度、利率/久期、流动性与折溢价风险")
                 lines.append("  降级：利率环境、久期和折溢价未纳入，仅做账户仓位复核")
@@ -287,8 +290,16 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
         view, stock_data.get(view["position"].code),
         advice_by_code[view["position"].code], cash_note, executions,
         generated_at) for view in views}
+    ma_disciplines = {view["position"].code: build_ma_discipline(
+        view, stock_data.get(view["position"].code),
+        advice_by_code[view["position"].code], disciplines[view["position"].code],
+        cash_note) for view in views}
     for advice in advices:
-        advice["display_conflict"] = _advice_conflict(advice, disciplines[advice["code"]])
+        ma = ma_disciplines[advice["code"]]
+        advice["display_conflict"] = (_advice_conflict(advice, disciplines[advice["code"]])
+                                      or ma.get("ma_conflict_flag", False)
+                                      or (advice.get("action") == "ADD_SMALL"
+                                          and "禁止加仓" in ma.get("ma_forbidden_action", "")))
         if advice["display_conflict"]:
             advice["confidence"] = "低"
             advice["confidence_note"] += "、建议与纪律冲突"
@@ -296,13 +307,13 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     advice_order = {item["code"]: index for index, item in enumerate(advices)}
     focus.sort(key=lambda item: advice_order.get(item["position"].code, len(advices)))
     daily = _render_daily(pm, views, focus, news_result, generated_at,
-                          advice_by_code, advice_mode, disciplines)
+                          advice_by_code, advice_mode, disciplines, ma_disciplines)
     detail = _render_detail(
         pm, views, alerts or [], fetch_errors or [], news_result, generated_at,
-        advice_by_code, advice_mode, disciplines, degraded_sources,
+        advice_by_code, advice_mode, disciplines, ma_disciplines, degraded_sources,
     )
     telegram = _render_telegram(pm, views, news_result, generated_at,
-                                advice_by_code, disciplines, degraded_sources)
+                                advice_by_code, disciplines, ma_disciplines, degraded_sources)
     daily_path = report_dir / "my-portfolio-daily.md"
     detail_path = report_dir / "my-portfolio-detail.md"
     telegram_path = report_dir / "my-portfolio-telegram.txt"
@@ -312,7 +323,8 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus),
             "telegram": telegram_path,
             "advices": advices, "views": views, "stock_data": stock_data,
-            "advice_mode": advice_mode, "disciplines": disciplines}
+            "advice_mode": advice_mode, "disciplines": disciplines,
+            "ma_disciplines": ma_disciplines}
 
 
 def _risk_level(views: List[dict]) -> str:
@@ -330,7 +342,7 @@ def _risk_level(views: List[dict]) -> str:
 
 def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
                   generated_at: datetime.datetime, advice_by_code: dict,
-                  advice_mode: str, disciplines: dict) -> str:
+                  advice_mode: str, disciplines: dict, ma_disciplines: dict) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
     total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0.0
@@ -389,6 +401,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
                 "- 纪律：不按股票超买信号机械减仓；不使用浅套/深套、卖飞或做T作为主纪律",
                 "- 重点：仓位集中度、账户防守资产占比、流动性、折溢价及利率/久期风险",
                 "- 趋势用途：价格趋势与ATR仅用于异常监测，不以压力位触发减仓",
+                f"- 均线纪律：{compact_ma_note(ma_disciplines[pos.code])}",
                 f"- 操作倾向：{advice['action_label']}；建议仓位变化：0 个百分点；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
                 "- 数据降级：利率环境、久期和折溢价未纳入，本条仅做账户防守仓位复核",
                 f"- 核心理由：{'；'.join(advice['reasons'][:2])}",
@@ -411,6 +424,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
             f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
             f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
             f"- 交易纪律：{short_note(disciplines[pos.code])}",
+            f"- 均线纪律：{compact_ma_note(ma_disciplines[pos.code])}",
             f"- 核心理由：{advice['ai_note'] or '；'.join(advice['reasons'][:2])}",
         ])
         if item["pnl_pct"] is not None and item["pnl_pct"] <= -0.15:
@@ -484,6 +498,7 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
 def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
                    news_result: dict, generated_at: datetime.datetime,
                    advice_by_code: dict, advice_mode: str, disciplines: dict,
+                   ma_disciplines: dict,
                    degraded_sources: List[str]) -> str:
     total_cost = sum(item["position"].cost_value for item in views if item["position"].current_price > 0)
     total_pnl = pm.total_market_value - total_cost
@@ -547,6 +562,19 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
             f"- T机会：{d['t_opportunity']}",
             f"- 现金防守：{d['cash_defense_note']}",
             f"- 理由：{d['reason']}；近期卖出证据：{d['sale_status']}", "",
+        ])
+    lines.extend(["", "## 均线趋势纪律（ma-discipline-v2）", "",
+                  "只提供确定性复核提示，不改写早间区间、原建议或交易清单。", ""])
+    for item in views:
+        pos = item["position"]
+        ma = ma_disciplines[pos.code]
+        lines.extend([
+            f"### {pos.name}（{pos.code}）", "",
+            f"- 状态：{ma['ma_state']}；动作提示：{ma['ma_action_hint']}",
+            f"- 禁止：{ma['ma_forbidden_action']}",
+            f"- 确认：{ma['ma_confirmation']}",
+            f"- 冲突：{'是' if ma['ma_conflict_flag'] else '否'}",
+            f"- 理由：{ma['ma_reason']}", "",
         ])
     lines.extend([
         "",
