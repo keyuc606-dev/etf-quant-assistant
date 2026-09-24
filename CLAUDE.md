@@ -81,6 +81,8 @@ v3 在 09:20 推送前，把每个持仓的原始建议追加到私有状态仓�
 
 MA5 上方乖离不再单独等同持续过热。`single_day_momentum_burst` 表示按 ATR 归一化的单日大幅扩张：可靠封板时观察且不追高，封板数据缺失时等待次日确认，只有未封板并出现冲高回落、炸板或量价背离时才进入减仓复核。`persistent_overheat` 至少需要多日拉升、MA5 乖离持续偏高、接近目标/压力、滞涨/量价背离中的两项确认，才提示分批锁利复核。
 
+`final-decision-v1` 是 09:20 与 14:30 对外建议的唯一最终动作来源。最终枚举固定为 `HOLD / ADD / REDUCE / RISK_EXIT / NO_ACTION / MANUAL_REVIEW`；观察、观望、等待只能作为状态说明。它只收敛真实账户建议，不修改 ETF allocation/rebalance/backtest。所有动作仍需人工确认，系统不下单。减仓先分为 `RISK_CONTROL / PROFIT_TAKING / TACTICAL_T`：风险控制不受做T经济性限制，锁利仅参考经济性，只有战术做T必须同时通过价差与净收益双门槛。默认参数集中在 `config.FINAL_DECISION_PARAMS`；费用沿用佣金万2.5（最低5元），并保守加入A股卖出印花税、沪市过户费及双边0.1%滑点。详细口径见 `docs/FINAL-DECISION-v1.md`。
+
 ## 数据文件与缓存机制
 
 - **portfolio.json**：持仓列表。字段见 `data/portfolio.example.json`。港股 `current_price`/`cost_price` 填**港币原价**，系统按 `config.FX_RATES` 自动折算人民币。每次保存自动生成 `portfolio.json.bak`；文件损坏时程序报错并把原文件改名 `*.corrupt-<时间戳>`，用 `.bak` 恢复即可。

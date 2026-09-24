@@ -75,6 +75,7 @@ def test_report_defense_filters_today_and_degrades_fallback_news(tmp_path):
     assert reports["advices"][0]["confidence"] != "高"
     telegram = reports["telegram"].read_text(encoding="utf-8")
     detail = reports["detail"].read_text(encoding="utf-8")
+    assert "最终结论：" in telegram and "触发：" in telegram and "取消：" in telegram
     assert "warning/degraded" in telegram and "新闻不完整" in telegram
     assert "备用源接管" in detail and "全部技术指标" in detail
 

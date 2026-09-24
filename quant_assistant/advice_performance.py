@@ -12,6 +12,7 @@ import pandas as pd
 from .data.fetcher import CN_TZ
 from .asset_routing import ROUTING_VERSION, subtype_for
 from .analysis.ma_discipline import VERSION as MA_DISCIPLINE_VERSION
+from .analysis.final_decision import VERSION as FINAL_DECISION_VERSION
 
 
 WINDOWS = (5, 10, 20)
@@ -41,7 +42,15 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
         # Include its own version in the immutable identity so a same-day manual
         # validation can coexist with a pre-deployment record instead of trying
         # to overwrite it.
-        identity = f"{as_of}:{pos.code}:{RULE_VERSION}:{MA_DISCIPLINE_VERSION}"
+        identity = (f"{as_of}:{pos.code}:{RULE_VERSION}:{MA_DISCIPLINE_VERSION}:"
+                    f"{FINAL_DECISION_VERSION}")
+        final_decision = {key: advice.get(key) for key in (
+            "final_decision_version", "final_action", "final_action_label",
+            "action_reason", "action_size", "suggested_quantity", "suggested_amount",
+            "suggested_fraction", "trigger_condition", "cancel_condition", "confidence",
+            "conflict_note", "reduction_reason_type", "t_economics",
+            "manual_confirmation_required",
+        )}
         records.append({
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
@@ -54,6 +63,9 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "invalidation_price": advice["stop"], "target_price": advice["target"],
             "confidence": advice["confidence"], "position_weight": view["weight"],
             "cost_basis": float(pos.cost_price), "reference_close": reference,
+            "position_quantity": int(getattr(pos, "shares", 0)),
+            "position_market_value": (float(getattr(pos, "market_value", 0.0))
+                                      if view["available"] else None),
             "reference_volume": volume,
             "rule_version": RULE_VERSION, "code_commit": commit, "stat_version": STAT_VERSION,
             "data_cutoff": view["data_date"],
@@ -70,6 +82,13 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "ma_conflict_flag": ma_disciplines.get(pos.code, {}).get("ma_conflict_flag", False),
             "ma_reason": ma_disciplines.get(pos.code, {}).get("ma_reason"),
             "ma_discipline": ma_disciplines.get(pos.code),
+            "final_decision_version": FINAL_DECISION_VERSION,
+            "final_action": advice.get("final_action"),
+            "reduction_reason_type": advice.get("reduction_reason_type"),
+            "suggested_quantity": advice.get("suggested_quantity", 0),
+            "suggested_amount": advice.get("suggested_amount", 0.0),
+            "t_economics": advice.get("t_economics"),
+            "final_decision": final_decision,
         })
     return records
 

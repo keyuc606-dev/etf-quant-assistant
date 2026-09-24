@@ -12,7 +12,8 @@ from .config import REPORT_DIR
 from .analysis.discipline import sale_chase_alert, short_note, t_opportunity
 from .analysis.ma_discipline import (compact_ma_note, intraday_ma_discipline,
                                      intraday_priority_adjustment)
-from .asset_routing import BOND_ETF, QDII_ETF, role_label, subtype_for
+from .analysis.final_decision import build_intraday_final_decision, economics_text
+from .asset_routing import BOND_ETF, QDII_ETF, subtype_for
 from .data.fetcher import CN_TZ, DataFetcher
 from .models import Market
 from .portfolio.holdings import PortfolioManager
@@ -244,6 +245,11 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             ma_result = intraday_ma_discipline(advice, ma_quote, verdict["status"])
             verdict["ma_discipline"] = ma_result
             verdict["priority"] = intraday_priority_adjustment(verdict, ma_result)
+        else:
+            ma_result = {}
+        verdict["final_decision"] = build_intraday_final_decision(
+            pos, advice, quote, verdict["status"], ma_result,
+        )
         rows.append((verdict["priority"], verdict["distance_atr"], pos.code,
                      pos, quote, advice, verdict, subtype))
     rows.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -272,6 +278,7 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
                     if buy and reduce and stop else "早间关键区间不完整")
             discipline = advice.get("discipline") if advice else None
             ma_result = verdict.get("ma_discipline") or {}
+            final = verdict["final_decision"]
             forbidden = (discipline or {}).get("forbidden_action", "")
             conflict = verdict["status"] in ("已进入买入区", "接近买入区") and any(
                 word in forbidden for word in ("禁止越跌越补", "禁止补仓", "禁止加仓", "禁止情绪化追回"))
@@ -303,14 +310,21 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             elif executions is None and (discipline or {}).get("discipline_state") == "卖飞/减仓后续涨":
                 reminder = short_note(discipline)
             else:
-                reminder = (f"{verdict['rule']}；均线：{compact_ma_note(ma_result)}"
-                            if ma_result else verdict["rule"])
+                reminder = verdict["rule"]
             change = quote.get("change_pct") or 0
-            lines.append(f"{pos.name} {pos.code}｜{role_label(subtype)}｜{_price_text(quote['price'])} {change:+.2f}%｜{verdict['status']}")
+            lines.append(
+                f"{pos.name} {pos.code} {_price_text(quote['price'])}｜"
+                f"最终结论：{final['final_action_label']}｜{final['action_size']}｜置信{final['confidence']}"
+            )
+            lines.append(f"原因：{final['action_reason']}")
             lines.append(zone)
             gaps = [flag for flag in verdict["flags"] if "跳空" in flag]
-            lines.append(f"{verdict['distance']}｜纪律：{reminder}" +
+            lines.append(f"原始状态：{verdict['status']}｜{verdict['distance']}｜纪律：{reminder}｜"
+                         f"均线：{compact_ma_note(ma_result) if ma_result else '不可用'}" +
                          ("｜" + "、".join(gaps) if gaps else ""))
+            if final.get("t_economics"):
+                lines.append(f"做T经济性：{economics_text(final['t_economics'])}")
+            lines.append(f"取消条件：{final['cancel_condition']}")
             if detail is not None:
                 atr = (advice.get("technical_features") or {}).get("ATR") if advice else None
                 t_note = (t_opportunity({"buy_range": buy, "reduce_range": reduce,

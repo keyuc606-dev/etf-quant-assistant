@@ -1,5 +1,12 @@
 # 版本说明
 
+## 未发布 — final-decision-v1 最终决策层
+
+- 09:20 与 14:30 报告统一由 Final Decision Engine 输出唯一最终动作，不再把持有、观望、观察、等待并列为动作。
+- 减仓区分风险控制、分批锁利和战术做T；只有战术做T受可配置的价差/净收益双门槛约束。
+- 建议历史新增最终决策版本、动作、减仓目的、建议数量/金额和做T经济性审计字段，原有 advice outcome 口径保持不变。
+- 债券、黄金、商品和 QDII 继续使用资产专用路由；确定性 ETF allocation/rebalance/backtest 核心与参数未改。
+
 ## 未发布 — asset-routing-v1 资产分类与分策略报告
 
 - 新增 `asset_subtype`：`STOCK`、`EQUITY_ETF`、`BOND_ETF`、`GOLD_ETF`、`COMMODITY_ETF`、`QDII_ETF`；基于持久化字段、代码、名称和现有账户元数据离线识别，首次买入同步写入持仓与成交台账。

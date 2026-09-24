@@ -11,6 +11,7 @@ from ..analysis.indicators import add_all_indicators, get_signals
 from ..analysis.account_advice import build_rule_advices
 from ..analysis.discipline import build_discipline, cash_defense, short_note
 from ..analysis.ma_discipline import build_ma_discipline, compact_ma_note
+from ..analysis.final_decision import build_final_decision, economics_text
 from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
                              role_label, subtype_for, subtype_label)
 from ..config import ETF_POOL, REPORT_DIR
@@ -65,22 +66,6 @@ def _compact_range(value) -> str:
     return "-" if value is None else f"{_compact_price(value[0])}–{_compact_price(value[1])}"
 
 
-def _compact_discipline(discipline: dict) -> str:
-    if discipline.get("asset_subtype") == BOND_ETF:
-        return "债券专用纪律"
-    state = discipline.get("discipline_state", "")
-    forbidden = discipline.get("forbidden_action", "")
-    if state == "冲高滞涨":
-        return "接近压力，分批锁利复核"
-    if "摊平" in forbidden or "越跌越补" in forbidden:
-        return "禁止摊平"
-    if "追回" in forbidden:
-        return "禁追高"
-    if not discipline.get("t_opportunity", "").startswith("具备"):
-        return "不做T"
-    return "人工复核T空间"
-
-
 def _render_telegram(pm, views: List[dict], news_result: dict,
                      generated_at: datetime.datetime, advice_by_code: dict,
                      disciplines: dict, ma_disciplines: dict,
@@ -120,22 +105,23 @@ def _render_telegram(pm, views: List[dict], news_result: dict,
         for item in items:
             pos = item["position"]
             advice = advice_by_code[pos.code]
-            conflict = advice["display_conflict"]
-            label = "冲突，人工复核" if conflict else advice["action_label"]
-            discipline = "冲突，人工复核" if conflict else _compact_discipline(disciplines[pos.code])
             subtype = item["asset_subtype"]
-            lines.append(f"{pos.name}({pos.code})｜{role_label(subtype)}｜仓位{item['weight']:.1%}")
-            lines.append(f"  状态：{label}｜纪律：{discipline}｜置信{advice['confidence']}")
-            lines.append(f"  均线纪律：{compact_ma_note(ma_disciplines[pos.code])}")
+            lines.append(
+                f"{pos.name}({pos.code})｜最终结论：{advice['final_action_label']}｜"
+                f"{advice['action_size']}｜置信{advice['confidence']}"
+            )
             if subtype == BOND_ETF:
-                lines.append("  重点：仓位集中度、利率/久期、流动性与折溢价风险")
-                lines.append("  降级：利率环境、久期和折溢价未纳入，仅做账户仓位复核")
+                lines.append("  关键区间：债券ETF不使用股票式买/减/失效位")
             else:
-                lines.append(f"  买 {_compact_range(advice['buy_range'])}｜减 {_compact_range(advice['reduce_range'])}｜失效 {_compact_price(advice['stop'])}")
-            if conflict:
-                lines.append("  理由：建议与纪律冲突，暂停执行暗示")
-            elif advice.get("reasons"):
-                lines.append(f"  理由：{advice['reasons'][0]}")
+                lines.append(f"  关键区间：买 {_compact_range(advice['buy_range'])}｜减 {_compact_range(advice['reduce_range'])}｜失效 {_compact_price(advice['stop'])}")
+            lines.append(f"  原因：{advice['action_reason']}")
+            lines.append(f"  触发：{advice['trigger_condition']}")
+            lines.append(f"  取消：{advice['cancel_condition']}")
+            if advice.get("t_economics"):
+                lines.append(f"  做T经济性：{economics_text(advice['t_economics'])}")
+            if advice.get("conflict_note") != "无":
+                lines.append(f"  冲突，人工复核：{advice['conflict_note']}")
+            lines.append(f"  均线纪律：{compact_ma_note(ma_disciplines[pos.code])}（仅状态说明）")
 
     add_items("风险重点", risk)
     add_items("仓位重点", weight)
@@ -303,6 +289,12 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
         if advice["display_conflict"]:
             advice["confidence"] = "低"
             advice["confidence_note"] += "、建议与纪律冲突"
+        view = next(item for item in views if item["position"].code == advice["code"])
+        decision = build_final_decision(
+            view, advice, disciplines[advice["code"]], ma,
+            total_assets=pm.total_assets, cash=pm.cash,
+        )
+        advice.update(decision)
     focus = select_focus_positions(views)
     advice_order = {item["code"]: index for index, item in enumerate(advices)}
     focus.sort(key=lambda item: advice_order.get(item["position"].code, len(advices)))
@@ -324,7 +316,17 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
             "telegram": telegram_path,
             "advices": advices, "views": views, "stock_data": stock_data,
             "advice_mode": advice_mode, "disciplines": disciplines,
-            "ma_disciplines": ma_disciplines}
+            "ma_disciplines": ma_disciplines,
+            "final_decisions": {item["code"]: {
+                key: item.get(key) for key in (
+                    "final_decision_version", "final_action", "final_action_label",
+                    "action_reason", "action_size", "suggested_quantity",
+                    "suggested_amount", "suggested_fraction", "trigger_condition",
+                    "cancel_condition", "confidence", "conflict_note",
+                    "reduction_reason_type", "t_economics",
+                    "manual_confirmation_required",
+                )
+            } for item in advices}}
 
 
 def _risk_level(views: List[dict]) -> str:
@@ -402,7 +404,8 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
                 "- 重点：仓位集中度、账户防守资产占比、流动性、折溢价及利率/久期风险",
                 "- 趋势用途：价格趋势与ATR仅用于异常监测，不以压力位触发减仓",
                 f"- 均线纪律：{compact_ma_note(ma_disciplines[pos.code])}",
-                f"- 操作倾向：{advice['action_label']}；建议仓位变化：0 个百分点；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
+                f"- 最终结论：{advice['final_action_label']}；动作大小：{advice['action_size']}；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
+                f"- 触发：{advice['trigger_condition']}；取消：{advice['cancel_condition']}",
                 "- 数据降级：利率环境、久期和折溢价未纳入，本条仅做账户防守仓位复核",
                 f"- 核心理由：{'；'.join(advice['reasons'][:2])}",
                 "",
@@ -420,7 +423,10 @@ def _render_daily(pm, views: List[dict], focus: List[dict], news_result: dict,
             f"- 资产提示：{advice.get('routing_note', '按资产类别规则复核')}",
             f"- 主题状态：{item['theme_observation'].get('status', '近期公开信息不足，暂不形成行业判断。')}" if subtype in ("STOCK", "EQUITY_ETF") else
             f"- 资产类别风险：{advice.get('routing_note', '按资产类别规则复核')}",
-            f"- 操作倾向：{'冲突，人工复核' if advice['display_conflict'] else advice['action_label']}；建议仓位变化：{'暂停展示' if advice['display_conflict'] else advice['position_change']}；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
+            f"- 最终结论：{advice['final_action_label']}；动作大小：{advice['action_size']}；综合置信度：{advice['confidence']}（{advice['confidence_note']}）",
+            f"- 一句话原因：{advice['action_reason']}",
+            f"- 触发：{advice['trigger_condition']}；取消：{advice['cancel_condition']}",
+            f"- 冲突说明：{advice['conflict_note']}",
             f"- 参考买入区间：{_price_range(advice['buy_range'])}；减仓区间：{_price_range(advice['reduce_range'])}",
             f"- 止损/失效位：{_price(advice['stop'])}；目标位：{_price(advice['target'])}",
             f"- 交易纪律：{short_note(disciplines[pos.code])}",
@@ -538,16 +544,16 @@ def _render_detail(pm, views: List[dict], alerts: list, fetch_errors: List[str],
         )
     lines.extend([
         "", "## 全部持仓规则建议", "",
-        "| 代码 | 倾向 | 买入区间 | 减仓区间 | 止损/失效位 | 目标位 | 仓位变化 | 置信度 | 核心理由 |",
-        "|---|---|---:|---:|---:|---:|---|---|---|",
+        "| 代码 | 最终结论 | 动作大小 | 买入区间 | 减仓区间 | 止损/失效位 | 目标位 | 减仓目的 | 置信度 | 核心理由 |",
+        "|---|---|---|---:|---:|---:|---:|---|---|---|",
     ])
     for item in views:
         advice = advice_by_code[item["position"].code]
         lines.append(
-            f"| {advice['code']} | {'冲突，人工复核' if advice['display_conflict'] else advice['action_label']} | {_price_range(advice['buy_range'])} | "
+            f"| {advice['code']} | {advice['final_action_label']} | {advice['action_size']} | {_price_range(advice['buy_range'])} | "
             f"{_price_range(advice['reduce_range'])} | {_price(advice['stop'])} | {_price(advice['target'])} | "
-            f"{'暂停展示' if advice['display_conflict'] else advice['position_change']} | {advice['confidence']}（{advice['confidence_note']}） | "
-            f"{advice['ai_note'] or '；'.join(advice['reasons'])} |"
+            f"{advice.get('reduction_reason_type') or '-'} | {advice['confidence']}（{advice['confidence_note']}） | "
+            f"{advice['action_reason']} |"
         )
     lines.extend(["", "## 交易纪律实验标签（discipline-v1）", "",
                   "仅供人工复核，不改变原建议、ETF交易清单或效果结算口径。", ""])

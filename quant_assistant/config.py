@@ -57,6 +57,29 @@ STRATEGY_PARAMS = {
     "max_data_age_days": 7,         # 数据陈旧门禁：任一腿行情超过 7 天则禁止生成交易清单
 }
 
+# Final Decision Engine。这里只管理真实账户建议的确定性收敛和人工执行参考，
+# 不参与 ETF allocation/rebalance/backtest，也不会生成自动订单。
+FINAL_DECISION_PARAMS = {
+    "version": "final-decision-v1",
+    "stock_lot_size": 100,
+    "etf_lot_size": STRATEGY_PARAMS["lot_size"],
+    "add_fraction_of_assets": 0.01,
+    "risk_reduce_fraction": 0.50,
+    "profit_taking_fraction": 0.25,
+    "tactical_t_fraction": 0.50,
+    # 做T双门槛：价差至少 2%，且至少为估算往返成本率的 3 倍。
+    "t_gap_floor": 0.02,
+    "t_cost_safety_multiple": 3.0,
+    "t_min_net_profit": 100.0,
+    # 与现有回测口径一致：佣金万2.5（最低5元）、A股卖出印花税千0.5、
+    # 沪市过户费万0.1；滑点按买卖各0.1%保守估算。
+    "commission_rate": STRATEGY_PARAMS["commission_rate"],
+    "min_commission": STRATEGY_PARAMS["min_commission"],
+    "stock_stamp_tax_rate": 0.0005,
+    "sh_transfer_fee_rate": 0.00001,
+    "slippage_rate_per_side": 0.001,
+}
+
 RISK_DEFAULTS = {
     "single_position_max": 0.30,
     "single_position_warn": 0.20,
