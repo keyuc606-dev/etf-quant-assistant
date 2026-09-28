@@ -20,6 +20,13 @@ from .portfolio.holdings import PortfolioManager
 from .trading.service import TradingService
 
 
+EXECUTION_SESSION = "10:30_EXECUTION"
+_LEVEL_ZH = {"HIGH": "高", "MEDIUM": "中", "LOW": "低"}
+_ACTION_PRIORITY = {"RISK_EXIT": 0, "REDUCE": 1, "ADD": 2,
+                    "MANUAL_REVIEW": 3, "HOLD": 4, "NO_ACTION": 5}
+_PUBLIC_ACTIONS = {"ADD", "REDUCE", "RISK_EXIT", "MANUAL_REVIEW"}
+
+
 def cloud_available() -> bool:
     return bool(os.getenv("ACCOUNT_STATE_TOKEN") and os.getenv("ACCOUNT_STATE_REPO"))
 
@@ -52,18 +59,19 @@ def recalculate(records: list[dict], now: dt.datetime, fetcher=None,
 
 
 def save_morning_advice(reports: dict, now: dt.datetime | None = None,
-                        store=None, fetcher=None) -> dict | None:
+                        store=None, fetcher=None,
+                        advice_session: str = "09:20_LEGACY") -> dict | None:
     if store is None and not cloud_available():
         return None
     now = now or dt.datetime.now(CN_TZ)
     store = store or CloudStateStore()
     state, sha = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
-    incoming = make_records(reports, now, os.getenv("GITHUB_SHA", "local"))
+    incoming = make_records(reports, now, os.getenv("GITHUB_SHA", "local"), advice_session)
     existing = state.get("advice_records", [])
     combined = append_immutable(existing, incoming)
     if len(combined) != len(existing):
         state["advice_records"] = combined
-        store.save(state, sha, f"Record morning advice {now.astimezone(CN_TZ).date()}")
+        store.save(state, sha, f"Record {advice_session} advice {now.astimezone(CN_TZ).date()}")
     persisted, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     persisted_by_id = {row["advice_id"]: row for row in persisted.get("advice_records", [])}
     if any(persisted_by_id.get(row["advice_id"]) != row for row in incoming):
@@ -140,6 +148,151 @@ def _distance(price, level):
 
 def _price_text(value):
     return f"{value:.3f}" if value < 10 else f"{value:.2f}"
+
+
+def _execution_data_quality(base: str, quote: dict | None,
+                            now: dt.datetime | None = None) -> str:
+    """Combine close-only inputs with a verified provisional quote."""
+    if base == "LOW" or not quote or not quote.get("provisional") or not _positive(quote.get("price")):
+        return "LOW"
+    if now is not None:
+        try:
+            stamp = dt.datetime.fromisoformat(str(quote.get("as_of")))
+            if stamp.tzinfo is None:
+                return "LOW"
+            local_now = now.astimezone(CN_TZ)
+            if (stamp.astimezone(CN_TZ).date() != local_now.date() or
+                    abs((local_now - stamp.astimezone(CN_TZ)).total_seconds()) > 900):
+                return "LOW"
+        except (TypeError, ValueError):
+            return "LOW"
+    required = ("open", "high", "low", "volume")
+    if base == "MEDIUM" or any(quote.get(key) is None for key in required):
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _decision_confidence(decision: dict, status: str, ma: dict) -> str:
+    action = decision.get("final_action")
+    if action == "RISK_EXIT" and status == "已失效":
+        return "HIGH" if "MA20有效跌破" in ma.get("ma_state", "") else "MEDIUM"
+    if action == "REDUCE" and ("MA20有效跌破" in ma.get("ma_state", "") or
+                               ma.get("ma_state") == "persistent_overheat"):
+        return "HIGH"
+    return decision.get("decision_confidence") or {
+        "高": "HIGH", "中": "MEDIUM", "低": "LOW"
+    }.get(decision.get("confidence"), "LOW")
+
+
+def _limit_range(record: dict, quote: dict, decision: dict) -> list[float] | None:
+    """Return deterministic limit references; this never creates an order."""
+    action = decision.get("final_action")
+    if action == "ADD":
+        zone = record.get("buy_zone")
+        return list(zone) if zone and len(zone) == 2 else None
+    if action == "REDUCE" and decision.get("reduction_reason_type") != "RISK_CONTROL":
+        zone = record.get("reduce_zone")
+        return list(zone) if zone and len(zone) == 2 else None
+    if action in ("REDUCE", "RISK_EXIT"):
+        price = _positive(quote.get("price"))
+        atr = _positive((record.get("technical_features") or {}).get("ATR"))
+        if price:
+            floor = max(.01, price - .25 * atr) if atr else price
+            return [floor, price]
+    return None
+
+
+def _render_order_range(value) -> str:
+    if not value:
+        return "不设价格单"
+    return f"{_price_text(value[0])}–{_price_text(value[1])}"
+
+
+def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
+                            quality: dict | None = None,
+                            detail: list[str] | None = None) -> str:
+    """Build the 10:30 executable shortlist from fresh provisional quotes."""
+    temporary = make_records(reports, now, os.getenv("GITHUB_SHA", "local"), EXECUTION_SESSION)
+    records = {row["code"]: row for row in temporary}
+    advices = {row["code"]: row for row in reports["advices"]}
+    candidates = []
+    degraded = []
+    for view in reports["views"]:
+        pos = view["position"]
+        advice = advices[pos.code]
+        record = records[pos.code]
+        quote = fetcher.fetch_intraday_quote(pos.code, pos.market, now)
+        data_quality = _execution_data_quality(advice.get("data_quality", "LOW"), quote, now)
+        if data_quality == "LOW":
+            degraded.append(pos.code)
+            decision = {
+                **(record.get("final_decision") or {}),
+                "final_action": "MANUAL_REVIEW", "final_action_label": "人工复核",
+                "action_reason": "当日新鲜盘中行情或上一完整交易日数据不足，不给强执行动作",
+                "suggested_quantity": 0, "suggested_amount": 0.0,
+                "action_size": "0股 / ￥0 / 0%", "decision_confidence": "LOW",
+                "data_quality": "LOW", "confidence": "低",
+                "limit_range": None,
+            }
+            advice.update(decision)
+            continue
+        verdict = classify_quote(record, quote, record.get("reference_volume"),
+                                 record.get("asset_subtype"))
+        ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
+        ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
+        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma)
+        decision["data_quality"] = data_quality
+        decision["decision_confidence"] = _decision_confidence(decision, verdict["status"], ma)
+        decision["confidence"] = _LEVEL_ZH[decision["decision_confidence"]]
+        decision["limit_range"] = _limit_range(record, quote, decision)
+        advice.update(decision)
+        # The immutable 10:30 reference is the verified provisional price.  It
+        # is stored only in advice history and never written to the daily cache.
+        pos.current_price = float(quote["price"])
+        if (decision["final_action"] in _PUBLIC_ACTIONS and
+                decision["decision_confidence"] in ("HIGH", "MEDIUM")):
+            candidates.append((
+                _ACTION_PRIORITY[decision["final_action"]], pos.code, pos, advice,
+                verdict, ma, quote,
+            ))
+        if detail is not None:
+            detail.append(
+                f"### {pos.name} {pos.code}\n{quote.get('as_of', '时间未标注')} "
+                f"{quote.get('source', '未知源')} provisional；状态 {verdict['status']}；"
+                f"数据 {data_quality}；决策 {decision['decision_confidence']}；"
+                f"均线 {compact_ma_note(ma)}。"
+            )
+    candidates.sort(key=lambda row: (row[0], row[1]))
+    selected = candidates[:5]
+    if quality is not None:
+        quality.update({"fresh_provisional": bool(reports["views"]) and
+                         len(degraded) < len(reports["views"]),
+                        "degraded": bool(degraded), "action_count": len(selected)})
+    day = now.astimezone(CN_TZ).date().isoformat()
+    lines = [f"【10:30 早盘执行策略】｜{day}",
+             "仅列确定性规则给出的可执行动作；盘中数据为 provisional，不自动下单。"]
+    for index, (_, _, pos, advice, _verdict, _ma, _quote) in enumerate(selected, 1):
+        decision = advice
+        lines.append(f"{index}. {pos.name} {pos.code}")
+        lines.append(
+            f"结论：{decision['final_action_label']}｜{decision['suggested_quantity']:,}股"
+            f"≈￥{decision['suggested_amount']:,.0f}｜决策{_LEVEL_ZH[decision['decision_confidence']]}"
+            f"｜数据{_LEVEL_ZH[decision['data_quality']]}"
+        )
+        stop = advice.get("stop")
+        lines.append(f"挂单{_render_order_range(decision.get('limit_range'))}｜"
+                     f"失效/取消{_price_text(stop) if stop else decision['cancel_condition']}")
+        lines.append(f"原因：{decision['action_reason']}")
+        if decision.get("t_economics"):
+            lines.append(f"做T经济性：{economics_text(decision['t_economics'])}")
+        if decision["final_action"] in ("ADD", "REDUCE"):
+            lines.append("未成交：不追价，14:35复核。")
+    hidden = len(reports["views"]) - len(selected)
+    lines.append(f"其余{hidden}只：无明确早盘动作。")
+    if degraded:
+        lines.append(f"其中{len(degraded)}只因数据质量低已折叠，不给强执行动作。")
+    lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
+    return "\n".join(lines)
 
 
 def classify_quote(advice: dict | None, quote: dict, avg_volume: float | None = None,
@@ -361,6 +514,131 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
     return "\n".join(lines)
 
 
+def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
+                            quality: dict | None = None,
+                            executions: list[dict] | None = None,
+                            detail: list[str] | None = None) -> str:
+    """Re-check the immutable 10:30 plan without assuming order execution."""
+    day = now.astimezone(CN_TZ).date().isoformat()
+    morning = {row["code"]: row for row in records
+               if row.get("as_of") == day and row.get("advice_session") == EXECUTION_SESSION}
+    candidates = []
+    degraded = []
+    fresh_count = 0
+    for pos in pm.positions:
+        quote = fetcher.fetch_intraday_quote(pos.code, pos.market, now)
+        record = morning.get(pos.code)
+        if not quote or not quote.get("provisional"):
+            degraded.append(pos.code)
+            continue
+        fresh_count += 1
+        if record is None:
+            if detail is not None:
+                detail.append(f"### {pos.name} {pos.code}\n无10:30执行建议基准；仅保留风险快照。")
+            continue
+        data_quality = _execution_data_quality(record.get("data_quality", "LOW"), quote, now)
+        verdict = classify_quote(record, quote, record.get("reference_volume"),
+                                 record.get("asset_subtype"))
+        ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
+        ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
+        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma)
+        decision["data_quality"] = data_quality
+        decision["decision_confidence"] = _decision_confidence(decision, verdict["status"], ma)
+        if data_quality == "LOW":
+            decision["decision_confidence"] = "LOW"
+        decision["confidence"] = _LEVEL_ZH[decision["decision_confidence"]]
+        decision["limit_range"] = _limit_range(record, quote, decision)
+        original = (record.get("final_decision") or {}).get("final_action", "NO_ACTION")
+        current = decision["final_action"]
+        if original in _PUBLIC_ACTIONS and current not in _PUBLIC_ACTIONS:
+            change = "CANCEL"
+        elif original in _PUBLIC_ACTIONS and current == original:
+            change = "CONTINUE"
+        elif original in _PUBLIC_ACTIONS:
+            change = "REVISE"
+        elif current in _PUBLIC_ACTIONS:
+            change = "NEW"
+        else:
+            change = "UNCHANGED"
+        eligible = (data_quality != "LOW" and
+                    (decision["decision_confidence"] in ("HIGH", "MEDIUM") or change == "CANCEL") and
+                    (current in _PUBLIC_ACTIONS or change == "CANCEL"))
+        if eligible:
+            priority = _ACTION_PRIORITY.get(current, 5)
+            candidates.append((priority, pos.code, pos, record, decision, change, verdict, ma))
+        if detail is not None:
+            detail.append(
+                f"### {pos.name} {pos.code}\n状态 {verdict['status']}；早盘 {original}；"
+                f"尾盘 {current}；变更 {change}；数据 {data_quality}；"
+                f"决策 {decision['decision_confidence']}；均线 {compact_ma_note(ma)}。"
+            )
+    candidates.sort(key=lambda row: (row[0], row[1]))
+    selected = candidates[:5]
+    if quality is not None:
+        quality.update({"morning_advice": bool(morning), "fresh_provisional": fresh_count > 0,
+                        "degraded": bool(degraded), "action_count": len(selected)})
+    lines = [f"【14:35 尾盘执行策略】｜{day}",
+             "仅复核10:30计划的继续、取消或修正；盘中数据为 provisional，不自动下单。"]
+    if not morning:
+        lines.append("今日无10:30执行建议基准：本次仅为风险快照，不伪造早盘计划。")
+    for index, (_, _, pos, record, decision, change, _verdict, _ma) in enumerate(selected, 1):
+        original = (record.get("final_decision") or {}).get("final_action", "NO_ACTION")
+        label = "取消原挂单/不再追价" if change == "CANCEL" else decision["final_action_label"]
+        lines.append(f"{index}. {pos.name} {pos.code}")
+        lines.append(
+            f"结论：{label}｜{decision['suggested_quantity']:,}股≈￥{decision['suggested_amount']:,.0f}"
+            f"｜决策{_LEVEL_ZH[decision['decision_confidence']]}｜数据{_LEVEL_ZH[decision['data_quality']]}"
+        )
+        if change != "CANCEL":
+            lines.append(f"挂单{_render_order_range(decision.get('limit_range'))}｜"
+                         f"取消条件：{decision['cancel_condition']}")
+        lines.append(f"原因：{decision['action_reason']}")
+        if decision.get("t_economics"):
+            lines.append(f"做T经济性：{economics_text(decision['t_economics'])}")
+        if original in _PUBLIC_ACTIONS:
+            pending = ("取消原挂单，不再追价。" if change == "CANCEL" else
+                       "仅按本次更新后的区间人工复核，区间外不追价。")
+            lines.append(f"若早盘订单未成交：{pending}")
+            lines.append("若已成交：请以已录入成交为准；系统不假设订单已执行。")
+    hidden = len(pm.positions) - len(selected)
+    lines.append(f"其余{hidden}只：无明确尾盘动作，维持原计划/不操作。")
+    if degraded:
+        lines.append(f"其中{len(degraded)}只实时数据不可用，已折叠且未用昨收冒充。")
+    lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
+    return "\n".join(lines)
+
+
+def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
+                             store=None, fetcher=None, notifier=None) -> Path:
+    """Persist the 10:30 baseline, verify it, then send the compact execution card."""
+    from .notifications.telegram import TelegramNotifier, split_telegram_message
+    now = now or dt.datetime.now(CN_TZ)
+    fetcher = fetcher or DataFetcher()
+    quality = {}
+    detail = []
+    text = build_morning_execution(reports, fetcher, now, quality, detail)
+    if not quality.get("fresh_provisional"):
+        raise RuntimeError("没有可验证的当日新鲜 provisional 行情，10:30执行策略不推送")
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORT_DIR / "my-portfolio-morning-execution.md"
+    path.write_text(text + "\n", encoding="utf-8")
+    detail_path = REPORT_DIR / "my-portfolio-morning-execution-detail.md"
+    detail_path.write_text("# 10:30早盘详细数据（provisional，仅人工参考）\n\n" +
+                           "\n\n".join(detail) + "\n", encoding="utf-8")
+    reports["telegram"] = path
+    save_morning_advice(reports, now, store=store, fetcher=fetcher,
+                        advice_session=EXECUTION_SESSION)
+    notifier = notifier or TelegramNotifier(fetcher=fetcher)
+    if not notifier.bot_token or not notifier.chat_id:
+        raise RuntimeError("缺少 Telegram 凭据")
+    for part in split_telegram_message(path.read_text(encoding="utf-8")):
+        fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
+    fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
+    print("10:30数据校验：新鲜provisional报价=True；"
+          f"存在降级={quality['degraded']}；主屏动作={quality['action_count']}")
+    return path
+
+
 def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
                     notifier=None) -> Path:
     from .notifications.telegram import TelegramNotifier, split_telegram_message
@@ -370,15 +648,15 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     fetcher = fetcher or DataFetcher()
     quality = {}
     detail = []
-    text = build_intraday(PortfolioManager(), state.get("advice_records", []), fetcher,
-                          now, quality,
-                          TradingService().repository.list_executions(), detail)
-    print("盘中数据校验：当日建议={morning_advice}；新鲜provisional报价={fresh_provisional}；存在降级={degraded}".format(**quality))
+    text = build_closing_execution(PortfolioManager(), state.get("advice_records", []), fetcher,
+                                   now, quality,
+                                   TradingService().repository.list_executions(), detail)
+    print("尾盘数据校验：10:30建议={morning_advice}；新鲜provisional报价={fresh_provisional}；存在降级={degraded}".format(**quality))
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "my-portfolio-intraday.md"
     path.write_text(text + "\n", encoding="utf-8")
     detail_path = REPORT_DIR / "my-portfolio-intraday-detail.md"
-    detail_path.write_text("# 盘中详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
+    detail_path.write_text("# 14:35尾盘详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")

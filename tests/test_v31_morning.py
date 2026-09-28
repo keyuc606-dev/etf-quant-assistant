@@ -73,6 +73,8 @@ def test_report_defense_filters_today_and_degrades_fallback_news(tmp_path):
                                        news_result=news, degraded_sources=["159000"])
     assert reports["stock_data"]["159000"].iloc[-1]["日期"].date() == dt.date(2026, 9, 21)
     assert reports["advices"][0]["confidence"] != "高"
+    assert reports["advices"][0]["data_quality"] == "MEDIUM"
+    assert reports["advices"][0]["decision_confidence"] == "HIGH"
     telegram = reports["telegram"].read_text(encoding="utf-8")
     detail = reports["detail"].read_text(encoding="utf-8")
     assert "最终结论：" in telegram and "触发：" in telegram and "取消：" in telegram

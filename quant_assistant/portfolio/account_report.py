@@ -246,7 +246,11 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     for advice in advices:
         view = next(item for item in views if item["position"].code == advice["code"])
         subtype = view["asset_subtype"]
+        advice["decision_confidence"] = {
+            "高": "HIGH", "中": "MEDIUM", "低": "LOW"
+        }.get(advice.get("confidence"), "LOW")
         issues = []
+        critical_issues = []
         statuses = news_result.get("source_status") or {}
         if (news_result.get("degraded") or news_result.get("is_stale")
                 or any(status not in ("ok", "success") for status in statuses.values())):
@@ -255,20 +259,29 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
             issues.append("主行情源降级")
         if view["data_date"] != cutoff.isoformat():
             issues.append("行情未覆盖上一完整交易日")
+            critical_issues.append("行情未覆盖上一完整交易日")
         if any(view["indicators"].get(key) is None for key in ("MA20", "ATR", "量比")):
             issues.append("关键指标缺失")
+            critical_issues.append("关键指标缺失")
         frame = stock_data.get(advice["code"])
         if frame is not None and "成交量" in frame and pd.to_numeric(frame.iloc[-1]["成交量"], errors="coerce") <= 0:
             issues.append("成交量异常")
+            critical_issues.append("成交量异常")
         if subtype == BOND_ETF:
             issues.append("利率/久期/折溢价未接入")
         elif subtype == QDII_ETF:
             issues.append("境外开闭市/汇率/折溢价未接入")
         elif subtype in (GOLD_ETF, COMMODITY_ETF):
             issues.append("宏观/商品驱动数据未完整接入")
+        if not view["available"]:
+            critical_issues.append("行情不可用")
+        advice["data_quality"] = ("LOW" if critical_issues else
+                                  "MEDIUM" if issues else "HIGH")
+        # Preserve the legacy field for old report/history readers.  New public
+        # execution cards use data_quality and decision_confidence separately.
         if issues:
-            advice["confidence"] = "低" if (len(issues) > 1 or not view["available"]
-                or view["data_date"] != cutoff.isoformat() or subtype == QDII_ETF) else "中"
+            advice["confidence"] = "低" if (len(issues) > 1 or critical_issues
+                or subtype == QDII_ETF) else "中"
         advice["confidence_note"] = "、".join(issues) if issues else "完整日K与关键指标可用"
     advice_by_code = {item["code"]: item for item in advices}
     cash_note = cash_defense(pm, views)
@@ -294,6 +307,11 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
             view, advice, disciplines[advice["code"]], ma,
             total_assets=pm.total_assets, cash=pm.cash,
         )
+        decision["data_quality"] = advice["data_quality"]
+        if decision["final_action"] != "MANUAL_REVIEW" and not advice["display_conflict"]:
+            decision["decision_confidence"] = advice["decision_confidence"]
+        if advice["data_quality"] == "LOW" or advice["display_conflict"]:
+            decision["decision_confidence"] = "LOW"
         advice.update(decision)
     focus = select_focus_positions(views)
     advice_order = {item["code"]: index for index, item in enumerate(advices)}
@@ -322,7 +340,8 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
                     "final_decision_version", "final_action", "final_action_label",
                     "action_reason", "action_size", "suggested_quantity",
                     "suggested_amount", "suggested_fraction", "trigger_condition",
-                    "cancel_condition", "confidence", "conflict_note",
+                    "cancel_condition", "confidence", "data_quality",
+                    "decision_confidence", "conflict_note",
                     "reduction_reason_type", "t_economics",
                     "manual_confirmation_required",
                 )

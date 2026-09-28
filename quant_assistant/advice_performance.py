@@ -21,7 +21,8 @@ MIN_SAMPLE = 10
 RULE_VERSION = ROUTING_VERSION
 
 
-def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[dict]:
+def make_records(reports: dict, generated_at: dt.datetime, commit: str,
+                 advice_session: str = "09:20_LEGACY") -> list[dict]:
     as_of = generated_at.astimezone(CN_TZ).date().isoformat()
     by_code = {a["code"]: a for a in reports["advices"]}
     disciplines = reports.get("disciplines", {})
@@ -43,17 +44,20 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
         # validation can coexist with a pre-deployment record instead of trying
         # to overwrite it.
         identity = (f"{as_of}:{pos.code}:{RULE_VERSION}:{MA_DISCIPLINE_VERSION}:"
-                    f"{FINAL_DECISION_VERSION}")
+                    f"{FINAL_DECISION_VERSION}:{advice_session}")
         final_decision = {key: advice.get(key) for key in (
             "final_decision_version", "final_action", "final_action_label",
             "action_reason", "action_size", "suggested_quantity", "suggested_amount",
             "suggested_fraction", "trigger_condition", "cancel_condition", "confidence",
+            "data_quality", "decision_confidence",
             "conflict_note", "reduction_reason_type", "t_economics",
             "manual_confirmation_required",
         )}
         records.append({
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
+            "advice_session": advice_session,
+            "generated_at": generated_at.astimezone(CN_TZ).isoformat(timespec="seconds"),
             "asset_type": pos.asset_type or ("ETF" if pos.market.name == "ETF" else "STOCK"),
             "asset_subtype": advice.get("asset_subtype") or subtype_for(pos),
             "market": pos.market.name, "action_tendency": advice["action"],
@@ -61,7 +65,10 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str) -> list[
             "buy_zone": list(advice["buy_range"]) if advice["buy_range"] is not None else None,
             "reduce_zone": list(advice["reduce_range"]) if advice["reduce_range"] is not None else None,
             "invalidation_price": advice["stop"], "target_price": advice["target"],
-            "confidence": advice["confidence"], "position_weight": view["weight"],
+            "confidence": advice["confidence"],
+            "data_quality": advice.get("data_quality", "LOW"),
+            "decision_confidence": advice.get("decision_confidence", "LOW"),
+            "position_weight": view["weight"],
             "cost_basis": float(pos.cost_price), "reference_close": reference,
             "position_quantity": int(getattr(pos, "shares", 0)),
             "position_market_value": (float(getattr(pos, "market_value", 0.0))

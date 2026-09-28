@@ -11,6 +11,7 @@
   python -m quant_assistant trade-history         # 查看本地成交台账
   python -m quant_assistant portfolio-reconcile   # 核对 SQLite 与持仓投影
   python -m quant_assistant notify-daily          # 生成30秒日报并单向推送到Telegram
+  python -m quant_assistant notify-morning-execution # 10:30早盘执行策略
 """
 import sys
 import os
@@ -181,10 +182,25 @@ def cmd_notify_daily(args):
     print(f"  Telegram 推送成功: {result.sent_parts} 条消息")
 
 
+def cmd_notify_morning_execution(args):
+    from .v3 import cloud_available, notify_morning_execution
+
+    try:
+        reports = cmd_daily(args)
+    except Exception as error:
+        raise RuntimeError(f"10:30执行策略基础数据生成失败: {error}") from error
+    if not reports or reports.get("market_data_count", 1) == 0:
+        raise RuntimeError("全部持仓上一完整交易日行情不可用，10:30执行策略未推送")
+    if os.getenv("GITHUB_ACTIONS") == "true" and not cloud_available():
+        raise RuntimeError("云端建议状态凭据缺失，10:30执行策略未推送")
+    path = notify_morning_execution(reports)
+    print(f"10:30早盘执行策略已推送：{path}")
+
+
 def cmd_notify_intraday(args):
     from .v3 import notify_intraday
     path = notify_intraday()
-    print(f"盘中风险快照已推送：{path}")
+    print(f"14:35尾盘执行策略已推送：{path}")
 
 
 def cmd_advice_recalculate(args):
@@ -463,7 +479,11 @@ def main():
     p_notify.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
     p_notify.set_defaults(func=cmd_notify_daily)
 
-    p_intraday = sub.add_parser("notify-intraday", help="14:30 盘中风险与执行检查")
+    p_morning = sub.add_parser("notify-morning-execution", help="10:30早盘执行策略")
+    p_morning.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
+    p_morning.set_defaults(func=cmd_notify_morning_execution)
+
+    p_intraday = sub.add_parser("notify-intraday", help="14:35 尾盘执行策略")
     p_intraday.set_defaults(func=cmd_notify_intraday)
 
     p_perf = sub.add_parser("advice-recalculate", help="从私有原始建议与市场日线重算统计")

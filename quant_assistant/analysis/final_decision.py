@@ -102,6 +102,11 @@ def estimate_t_economics(position, sell_price: float | None, buyback_price: floa
     }
 
 
+def _confidence_level(value: str | None) -> str:
+    return {"高": "HIGH", "中": "MEDIUM", "低": "LOW",
+            "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}.get(value or "", "LOW")
+
+
 def _decision(action: str, reason: str, confidence: str, trigger: str,
               cancel: str, conflict: str = "无", reduction_type: str | None = None,
               quantity: int = 0, amount: float = 0.0, fraction: float = 0.0,
@@ -124,7 +129,12 @@ def _decision(action: str, reason: str, confidence: str, trigger: str,
         "suggested_fraction": float(fraction),
         "trigger_condition": trigger,
         "cancel_condition": cancel,
+        # ``confidence`` is retained for old advice readers.  New reports use
+        # the two explicit fields below and never conflate market-data quality
+        # with the strength of the deterministic decision.
         "confidence": confidence,
+        "decision_confidence": _confidence_level(confidence),
+        "data_quality": "LOW",
         "conflict_note": conflict,
         "reduction_reason_type": reduction_type,
         "t_economics": economics,
@@ -147,7 +157,7 @@ def _sell_size(position, price: float, fraction: float) -> tuple[int, float, flo
 
 def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
                          total_assets: float = 0.0, cash: float = 0.0) -> dict:
-    """Collapse the 09:20 close-only layers into exactly one public action."""
+    """Collapse close-only preparation layers into exactly one public action."""
     pos = view["position"]
     subtype = view.get("asset_subtype") or subtype_for(pos)
     confidence = advice.get("confidence", "低")
@@ -263,8 +273,8 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
                                   price_status: str, ma: dict) -> dict:
     """Re-evaluate the single action using fresh provisional price only."""
     if record is None:
-        return _decision("MANUAL_REVIEW", "无当日09:20建议，仅能提供盘中风险快照", "低",
-                         "取得当日晨报审计记录", "仍无可验证的晨报基线", "缺少晨报基线")
+        return _decision("MANUAL_REVIEW", "无当日10:30建议，仅能提供盘中风险快照", "低",
+                         "取得当日执行建议审计记录", "仍无可验证的10:30基线", "缺少执行基线")
     subtype = record.get("asset_subtype") or subtype_for(position)
     morning = dict(record.get("final_decision") or {})
     confidence = record.get("confidence", morning.get("confidence", "低"))
@@ -285,8 +295,9 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
                          "报价仍不可验证", "实时数据不足")
     if price_status == "已失效":
         qty, amount, fraction = _sell_size(position, price, 1.0)
+        decision_confidence = "高" if "MA20有效跌破" in ma.get("ma_state", "") else "中"
         return _decision("RISK_EXIT", "盘中价格已跌破早间失效位，风险控制优先",
-                         confidence, "失效位跌破得到新鲜报价确认", "重新站回失效位并人工复核",
+                         decision_confidence, "失效位跌破得到新鲜报价确认", "重新站回失效位并人工复核",
                          reduction_type="RISK_CONTROL", quantity=qty, amount=amount, fraction=fraction)
     trend_broken = "MA20有效跌破" in ma.get("ma_state", "")
     if price_status in ("已进入买入区", "接近买入区") and trend_broken:
@@ -297,7 +308,7 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
         fraction = FINAL_DECISION_PARAMS["risk_reduce_fraction"]
         qty, amount, fraction = _sell_size(position, price, fraction)
         return _decision("REDUCE", "盘中MA20趋势破坏，风险减仓不受做T经济性限制",
-                         confidence, "趋势破坏保持", "重新站回MA20并确认结构修复",
+                         "高", "趋势破坏保持", "重新站回MA20并确认结构修复",
                          reduction_type="RISK_CONTROL", quantity=qty, amount=amount, fraction=fraction)
     triggered_reduce = price_status in ("目标已达", "已进入减仓区", "已超过减仓区")
     if triggered_reduce and ma.get("ma_state") == "persistent_overheat":
@@ -326,10 +337,19 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
     action = morning.get("final_action", "NO_ACTION")
     if action not in FINAL_ACTIONS:
         action = "MANUAL_REVIEW"
-    if action in ("REDUCE", "RISK_EXIT"):
-        # Morning reduction remains valid only through its saved deterministic facts.
+    if action == "ADD" and price_status == "已进入买入区":
         return {**morning, "manual_confirmation_required": True}
-    return _decision(action, morning.get("action_reason", "盘中未触发新条件，沿用晨报最终结论"),
+    if action == "ADD" and price_status != "已进入买入区":
+        return _decision("NO_ACTION", "盘中价格未处于确定性买入区，不生成追价建议",
+                         confidence, "重新进入买入区并通过趋势与风险闸门",
+                         "离开买入区或跌破失效位", "未成交不追价")
+    if action in ("REDUCE", "RISK_EXIT"):
+        # A saved risk action is not assumed to remain executable after price
+        # changes.  It must be re-confirmed above by the live status/MA rules.
+        return _decision("NO_ACTION", "原减仓条件未被当前盘中状态再次确认",
+                         confidence, "减仓区、失效位或趋势破坏重新触发",
+                         "原条件已失效", "等待盘中重新确认")
+    return _decision(action, morning.get("action_reason", "盘中未触发新条件，沿用10:30最终结论"),
                      confidence, morning.get("trigger_condition", "等待明确触发"),
                      morning.get("cancel_condition", "信号失效"), morning.get("conflict_note", "无"))
 
