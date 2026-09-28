@@ -32,8 +32,8 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 .venv\Scripts\python.exe -m quant_assistant trade-history --limit 20
 .venv\Scripts\python.exe -m quant_assistant portfolio-reconcile
 
-# 8. 生成30秒账户日报并单向推送到 Telegram（凭据只从环境变量读取）
-.venv\Scripts\python.exe -m quant_assistant notify-daily
+# 8. 10:30 早盘执行策略（上一完整交易日日K + 当日新鲜 provisional 行情）
+.venv\Scripts\python.exe -m quant_assistant notify-morning-execution
 
 # 9. 导出 GitHub Actions 使用的最后确认账户快照（本地敏感文件，禁止提交）
 .venv\Scripts\python.exe -m quant_assistant.cloud_snapshot export
@@ -45,7 +45,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 # 11. v3 建议效果重算（从私有状态仓库原始建议和历史日线重建，不修改原建议）
 .venv\Scripts\python.exe -m quant_assistant advice-recalculate
 
-# 12. v3 盘中风险检查（需先恢复私有账户状态，14:30 工作流自动执行）
+# 12. 14:35 尾盘执行策略（读取当日10:30基准）
 .venv\Scripts\python.exe -m quant_assistant notify-intraday
 ```
 
@@ -67,21 +67,21 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | 私有状态仓库 `state/account-state.json` | 云端最新确认账户、Telegram 游标和待确认项；不在本代码仓库 |
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
-09:20 日报是“前一交易日收盘 + 隔夜新闻的当天作战计划”，不是实时盘中建议。规则层产生全部价格与仓位数字；可选 OpenAI provider 仅压缩文字和排序。GitHub Secret `OPENAI_API_KEY` 未配置或调用失败时自动降级为纯规则版。
+用户可见推送只有工作日北京时间 10:30 早盘执行策略和 14:35 尾盘执行策略。09:20 不再推送；日K、新闻等准备代码仍可作为 10:30 的内部输入。规则层产生全部价格、限价参考与仓位数字；可选 OpenAI provider 仅压缩文字和排序。
 
-v3 在 09:20 推送前，把每个持仓的原始建议追加到私有状态仓库 `state/account-state.json` 的 `advice_records`；同一 advice_id 重试不会覆盖首次记录。`rule_version` 标识规则口径，`code_commit` 保留实际运行 commit。建议日志含真实账户成本、仓位等敏感信息，只能留在私有状态仓库。20 日结算统计仅用建议日之后完整交易日的 OHLC；当天同时触及目标和失效时记为顺序不明，不武断判胜。公开行情的前复权数据可能重算，历史重算结果也可能随数据源修订而变化。成交只有显式 `related_plan_id=advice_id` 时才归因，否则为 unknown。样本不足 10 条时不判断效果。
+v3 在 10:30 推送前把执行建议追加到私有状态仓库 `state/account-state.json` 的 `advice_records`。`advice_session=10:30_EXECUTION` 是新的当日短线基准；旧 `09:20_LEGACY` 记录继续可读且不重写。记录新增 `data_quality` 与 `decision_confidence`，旧 `confidence` 仅作兼容；outcome 定义不变。同一 advice_id 重试不会覆盖首次记录。`rule_version` 标识规则口径，`code_commit` 保留实际运行 commit。20 日结算仍只使用建议日之后完整交易日的 OHLC；成交只有显式 `related_plan_id=advice_id` 时才归因，否则为 unknown。
 
-账户持仓另存 `asset_subtype`，当前支持 `STOCK`、`EQUITY_ETF`、`BOND_ETF`、`GOLD_ETF`、`COMMODITY_ETF`、`QDII_ETF`。缺失字段由代码、名称和现有元数据离线补判；09:20、14:30、discipline-v1 和建议历史统一使用该分类。债券 ETF 不使用股票式 RSI/BOLL/压力位减仓、浅套/深套、卖飞或做T主纪律。宏观利率、久期、实时折溢价、汇率或境外开闭市状态拿不到时必须明确降级，不得从技术指标编造。
+账户持仓另存 `asset_subtype`，当前支持 `STOCK`、`EQUITY_ETF`、`BOND_ETF`、`GOLD_ETF`、`COMMODITY_ETF`、`QDII_ETF`。缺失字段由代码、名称和现有元数据离线补判；10:30、14:35、discipline-v1 和建议历史统一使用该分类。债券 ETF 不使用股票式 RSI/BOLL/压力位减仓、浅套/深套、卖飞或做T主纪律。宏观利率、久期、实时折溢价、汇率或境外开闭市状态拿不到时必须明确降级，不得从技术指标编造。
 
-14:30 工作流只读当日 09:20 建议和私有账户快照，读取带当日更新时间的临时报价；盘中数据带 `provisional`，不写入日线缓存，不运行周度 allocation/rebalance，不自动下单。无当日建议时改为持仓风险快照。A 股盘中报价用新浪带时间戳的单标的免费接口；ETF 优先复用东财快照的更新时间；失败时再尝试新浪和腾讯免费接口。报价无法验证为当日新鲜数据时只报告降级，不使用昨收冒充。盘中成交量统一以“手”表示。
+10:30 工作流用上一完整交易日日K和当日开盘后一小时左右的新鲜临时报价生成正式执行建议基准；14:35 只读当日 `10:30_EXECUTION` 建议和私有账户快照，回答继续、取消或修正。盘中数据带 `provisional`，不写入日线缓存，不运行周度 allocation/rebalance，不自动下单。无10:30基准时只给持仓风险快照。A 股盘中报价用新浪带时间戳的单标的免费接口；ETF 优先复用东财快照的更新时间；失败时再尝试新浪和腾讯免费接口。报价无法验证为当日新鲜数据时只报告降级，不使用昨收冒充。盘中成交量统一以“手”表示。
 
 尾盘状态按失效、目标/区间触发、ATR 归一化接近程度确定性排序；接近阈值为距关键价位不超过 0.35 ATR，同优先级按 ATR 距离再按代码排序。正文最多展开 3–5 只，其余一行摘要，详细报价、成交量和做T判断作为 Markdown 附件。跳空只在开盘与昨收均可靠时给方向及幅度。成交量基准为至少 5 个完整交易日（最多 20 日）的平均成交量，盘中按连续竞价时段进度归一化；14:45 起直接与完整日基准比较。基准或报价时点缺失时显示“成交量判断不可用”。做T须有可信日内开高低、昨收、ATR 和早间支撑压力，估算空间明显覆盖成本才给人工参考；绝不生成自动指令。
 
-`ma-discipline-v2` 是只读的 MA5/MA10/MA20 趋势纪律层，不修改早间买入区、减仓区、失效位、目标位或任何正式交易清单。股票与权益 ETF 完整启用；黄金、商品和 QDII 只使用趋势信息，不使用 A 股成交量与涨停/封板逻辑；债券 ETF 默认关闭。显著 MA5 乖离按 ATR 归一化，不采用全市场固定百分比。MA5/MA10 转强只建立加仓候选，必须继续通过买入区、风险收益、discipline-v1、现金和仓位闸门；MA20 有效跌破只建立禁止加仓/优先减仓提示，只有失效位或关键支撑同步失守时才显示“清仓复核”。09:20 与 14:30 报告展示均线纪律，建议历史保存独立版本与状态字段，但 advice outcome 定义保持不变。
+`ma-discipline-v2` 是只读的 MA5/MA10/MA20 趋势纪律层，不修改早间买入区、减仓区、失效位、目标位或任何正式交易清单。股票与权益 ETF 完整启用；黄金、商品和 QDII 只使用趋势信息，不使用 A 股成交量与涨停/封板逻辑；债券 ETF 默认关闭。显著 MA5 乖离按 ATR 归一化，不采用全市场固定百分比。MA5/MA10 转强只建立加仓候选，必须继续通过买入区、风险收益、discipline-v1、现金和仓位闸门；MA20 有效跌破只建立禁止加仓/优先减仓提示，只有失效位或关键支撑同步失守时才显示“清仓复核”。10:30 与 14:35 报告展示均线纪律，建议历史保存独立版本与状态字段，但 advice outcome 定义保持不变。
 
 MA5 上方乖离不再单独等同持续过热。`single_day_momentum_burst` 表示按 ATR 归一化的单日大幅扩张：可靠封板时观察且不追高，封板数据缺失时等待次日确认，只有未封板并出现冲高回落、炸板或量价背离时才进入减仓复核。`persistent_overheat` 至少需要多日拉升、MA5 乖离持续偏高、接近目标/压力、滞涨/量价背离中的两项确认，才提示分批锁利复核。
 
-`final-decision-v1` 是 09:20 与 14:30 对外建议的唯一最终动作来源。最终枚举固定为 `HOLD / ADD / REDUCE / RISK_EXIT / NO_ACTION / MANUAL_REVIEW`；观察、观望、等待只能作为状态说明。它只收敛真实账户建议，不修改 ETF allocation/rebalance/backtest。所有动作仍需人工确认，系统不下单。减仓先分为 `RISK_CONTROL / PROFIT_TAKING / TACTICAL_T`：风险控制不受做T经济性限制，锁利仅参考经济性，只有战术做T必须同时通过价差与净收益双门槛。默认参数集中在 `config.FINAL_DECISION_PARAMS`；费用沿用佣金万2.5（最低5元），并保守加入A股卖出印花税、沪市过户费及双边0.1%滑点。详细口径见 `docs/FINAL-DECISION-v1.md`。
+`final-decision-v1` 是 10:30 与 14:35 对外建议的唯一最终动作来源。最终枚举固定为 `HOLD / ADD / REDUCE / RISK_EXIT / NO_ACTION / MANUAL_REVIEW`；观察、观望、等待只能作为状态说明。主报告最多显示 5 个 `data_quality != LOW` 且 `decision_confidence` 为 `HIGH/MEDIUM` 的明确动作；新闻不完整不会自动压低由新鲜价格、失效位和 MA20 共同确认的风险退出确定性。ADD 与战术性 REDUCE 均执行“未成交不追价”，等待 14:35 复核。它只收敛真实账户建议，不修改 ETF allocation/rebalance/backtest。所有动作仍需人工确认，系统不下单。减仓先分为 `RISK_CONTROL / PROFIT_TAKING / TACTICAL_T`：风险控制不受做T经济性限制，锁利仅参考经济性，只有战术做T必须同时通过价差与净收益双门槛。详细口径见 `docs/FINAL-DECISION-v1.md` 与 `docs/EXECUTION-PLANS-v1.md`。
 
 ## 数据文件与缓存机制
 

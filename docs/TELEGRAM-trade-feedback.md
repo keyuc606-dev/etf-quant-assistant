@@ -40,7 +40,7 @@ GitHub Actions 每五分钟轮询一次，因此回复通常不是即时的，Gi
 ## 持久化与安全边界
 
 `ACCOUNT_SNAPSHOT_B64` 不能由普通 workflow 使用默认 `GITHUB_TOKEN` 安全地自更新，
-因此它只保留为首次迁移和 09:20 日报的兼容后备。最新账户快照、Telegram 更新游标、
+因此它只保留为首次迁移和 10:30 执行策略的兼容后备。最新账户快照、Telegram 更新游标、
 待确认交易和待发送回复统一写入一个专用私有 GitHub 仓库的
 `state/account-state.json`。两个 workflow 使用同一个 concurrency group 串行读写，
 GitHub Contents API 的文件 SHA 提供乐观并发保护。
@@ -63,7 +63,7 @@ Base64 是编码，不是加密。状态仓库必须是私有仓库，令牌只�
 4. 保留已有 `ACCOUNT_SNAPSHOT_B64`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`。
    不要把任何 secret 发到聊天、日志或提交中。
 5. `Actions` → `Account Trade Telegram` → `Run workflow`。首次运行会把现有
-   `ACCOUNT_SNAPSHOT_B64` 迁移到私有状态仓库。成功后，09:20 日报自动优先读取它。
+   `ACCOUNT_SNAPSHOT_B64` 迁移到私有状态仓库。成功后，10:30 执行策略自动优先读取它。
 
 如果 Bot 之前配置过 webhook，`getUpdates` 会被 Telegram 拒绝；部署此轮询方案前需
 先移除 webhook。
@@ -79,5 +79,5 @@ Base64 是编码，不是加密。状态仓库必须是私有仓库，令牌只�
 **仅 `account_snapshot_b64` 字段**到当前文件并提交；保留当前 `telegram` 对象，避免
 旧的“确认”更新被再次消费。随后手动运行 `Account Daily Telegram` 验证日报。
 
-明天 09:20 workflow 会执行 `quant_assistant.cloud_state restore`：状态仓库已配置时读取
+下一个交易日 10:30 workflow 会执行 `quant_assistant.cloud_state restore`：状态仓库已配置时读取
 最新确认快照；尚未配置时仍读取原 `ACCOUNT_SNAPSHOT_B64`，因此既有日报不会中断。

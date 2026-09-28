@@ -1,19 +1,10 @@
-name: Account Daily Telegram
+name: Account Morning Execution Telegram
 
 "on":
   workflow_dispatch:
-    inputs:
-      mode:
-        description: "Manual validation mode"
-        required: true
-        default: daily
-        type: choice
-        options:
-          - daily
-          - intraday
   schedule:
-    # GitHub Actions cron uses UTC. 01:20 UTC = 09:20 Asia/Shanghai.
-    - cron: "20 1 * * 1-5"
+    # GitHub Actions cron uses UTC. 02:30 UTC = 10:30 Asia/Shanghai.
+    - cron: "30 2 * * 1-5"
 
 permissions:
   contents: read
@@ -49,8 +40,7 @@ jobs:
           ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
         run: python -m quant_assistant.cloud_state restore
 
-      - name: Generate and send account daily report
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'daily'
+      - name: Generate and send morning execution plan
         env:
           ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
@@ -59,17 +49,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
-        run: python -m quant_assistant notify-daily
-
-      - name: Send provisional intraday risk check (manual validation)
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'intraday'
-        env:
-          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
-          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
-          ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m quant_assistant notify-intraday
+        run: python -m quant_assistant notify-morning-execution
 
       - name: Remove sensitive runtime files
         if: always()
@@ -79,4 +59,6 @@ jobs:
           rm -f data/trading.sqlite3 data/trading.sqlite3-shm data/trading.sqlite3-wal
           rm -f data/reports/my-portfolio-daily.md data/reports/my-portfolio-detail.md
           rm -f data/reports/my-portfolio-telegram.txt
+          rm -f data/reports/my-portfolio-morning-execution.md
+          rm -f data/reports/my-portfolio-morning-execution-detail.md
           rm -f data/reports/my-portfolio-intraday.md

@@ -17,7 +17,7 @@ Telegram 单向短消息
 运行命令：
 
 ```powershell
-.venv\Scripts\python.exe -m quant_assistant notify-daily
+.venv\Scripts\python.exe -m quant_assistant notify-morning-execution
 ```
 
 程序只从当前 Windows 进程环境读取 `TELEGRAM_BOT_TOKEN` 和
@@ -47,8 +47,8 @@ Get-Content -Raw data\cloud-account-snapshot.b64 | Set-Clipboard
 `.gitignore` 明确排除；它仍含真实持仓和现金，禁止提交、分享或粘贴到日志。
 
 `.github/workflows/account-daily-telegram.yml` 使用 Python 3.12，支持手动触发，并在
-工作日 `01:20 UTC`（北京时间 `09:20`）运行。每次任务从 Secret 恢复一份临时
-`trading.sqlite3` opening snapshot，再复用现有 `notify-daily` 生成并推送日报；不上传
+工作日 `02:30 UTC`（北京时间 `10:30`）运行。每次任务从 Secret 恢复一份临时
+`trading.sqlite3` opening snapshot，再执行 `notify-morning-execution` 生成并推送执行策略；不上传
 数据库、账户投影、报告或 Artifact，结束时清理敏感运行文件。
 
 这是只读推送 MVP，不提供云端成交回写、Telegram 成交反馈或自动交易。它保存的是导出时的

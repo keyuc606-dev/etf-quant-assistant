@@ -1,10 +1,10 @@
-name: Account Intraday Telegram
+name: Account Closing Execution Telegram
 
 "on":
   workflow_dispatch:
   schedule:
-    # 06:30 UTC = 14:30 Asia/Shanghai; weekdays only.
-    - cron: "30 6 * * 1-5"
+    # 06:35 UTC = 14:35 Asia/Shanghai; weekdays only.
+    - cron: "35 6 * * 1-5"
 
 permissions:
   contents: read
@@ -35,7 +35,7 @@ jobs:
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
           ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
         run: python -m quant_assistant.cloud_state restore
-      - name: Send provisional intraday risk check
+      - name: Send provisional closing execution plan
         env:
           ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
