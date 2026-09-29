@@ -47,6 +47,10 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 
 # 12. 14:35 尾盘执行策略（读取当日10:30基准）
 .venv\Scripts\python.exe -m quant_assistant notify-intraday
+
+# 13. 月度策略复盘（原始建议 + 显式关联成交 + 真实交易日日线重算）
+.venv\Scripts\python.exe -m quant_assistant monthly-review --month 2026-09
+.venv\Scripts\python.exe -m quant_assistant monthly-review --backfill
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -68,6 +72,8 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
 用户可见推送只有工作日北京时间 10:30 早盘执行策略和 14:35 尾盘执行策略。09:20 不再推送；日K、新闻等准备代码仍可作为 10:30 的内部输入。规则层产生全部价格、限价参考与仓位数字；可选 OpenAI provider 仅压缩文字和排序。
+
+这里的“工作日”必须由 A 股交易所日历确认，不等同于周一至周五。通知命令在任何报告、advice_session 或 Telegram 操作之前执行强门禁；休市和 `unknown` 都以退出码 0 静默跳过。运行时交易日缓存来自 AkShare/Sina 交易日接口（唯一联网仍在 `data/fetcher.py`），2024–2026 年上交所年度休市安排作为随代码审计的离线基线。调休上班的周末仍不开盘。
 
 v3 在 10:30 推送前把执行建议追加到私有状态仓库 `state/account-state.json` 的 `advice_records`。`advice_session=10:30_EXECUTION` 是新的当日短线基准；旧 `09:20_LEGACY` 记录继续可读且不重写。记录新增 `data_quality` 与 `decision_confidence`，旧 `confidence` 仅作兼容；outcome 定义不变。同一 advice_id 重试不会覆盖首次记录。`rule_version` 标识规则口径，`code_commit` 保留实际运行 commit。20 日结算仍只使用建议日之后完整交易日的 OHLC；成交只有显式 `related_plan_id=advice_id` 时才归因，否则为 unknown。
 

@@ -74,6 +74,8 @@ cp data/portfolio.example.json data/portfolio.json
 | `python -m quant_assistant dashboard` | 只生成持仓仪表盘（完全离线） | 随时 |
 | `python -m quant_assistant backtest-portfolio --start 2016-01-01` | 组合级回测，输出年度收益表 + 与沪深300对照 + HTML 报告 | 验证策略时 |
 | `python -m quant_assistant backtest <code> --strategy dual_ma` | 单标的技术策略回测（双均线/MACD/RSI/KDJ/组合） | 研究用 |
+| `python -m quant_assistant monthly-review --month 2026-09` | 从原始建议、成交与日线重算 CSV + Markdown 月报 | 月度复盘 |
+| `python -m quant_assistant monthly-review --backfill` | 尽可能回填已有 advice history 的全部月份 | 历史兼容复盘 |
 | `python -m quant_assistant screen` | A 股观察池多因子筛选 | 研究用 |
 
 ### 周度工作流（每周 10 分钟）
@@ -161,6 +163,8 @@ Telegram 交易反馈的命令格式、私有云端状态和部署步骤见
 ### v3 日内执行策略
 
 工作日北京时间 10:30 执行 `notify-morning-execution`：先把日K截断到上一完整交易日，再用当日新鲜 provisional 行情通过 Final Decision Engine 生成最多 5 条执行动作。14:35 的 `notify-intraday` 只复核早盘基准的继续、取消或修正。09:20 不再推送。`data_quality` 与 `decision_confidence` 独立，任一强动作都必须数据质量不低且决策确定性为中/高；未成交不追价。完整口径及新旧报告对比见 [docs/EXECUTION-PLANS-v1.md](docs/EXECUTION-PLANS-v1.md)。
+
+10:30 与 14:35 命令开始时都先经过 A 股交易所日历强门禁。日历优先使用本地审计缓存，并内置 2024–2026 年上交所年度休市安排；缓存和内置范围都无法确认时按 `unknown` 安全跳过。休市或未知状态不生成报告、不写 advice history、也不发送 Telegram。月报说明与示例见 [docs/MONTHLY-REVIEW.md](docs/MONTHLY-REVIEW.md)。
 
 可选在 GitHub Actions 增加 `OPENAI_API_KEY` Secret；模型只接收去标识化的代码、规则倾向与理由，并且只能压缩说明和排序，不能写入任何数字字段。未配置 key、网络失败或响应异常时自动使用纯规则版，日报与 Telegram 仍正常发送。可选仓库变量 `OPENAI_MODEL` 用于覆盖默认模型 `gpt-5-mini`。
 

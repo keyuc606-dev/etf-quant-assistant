@@ -17,11 +17,28 @@ import sys
 import os
 import argparse
 import datetime
+from pathlib import Path
 
 from .models import Market
 
 
 STRATEGY_CHOICES = ["dual_ma", "macd", "rsi", "kdj", "composite"]
+
+
+def _notification_trading_day_gate(session: str, now=None, fetcher=None) -> bool:
+    """Strong, fail-closed gate before reports, advice state or Telegram work."""
+    from .data.fetcher import CN_TZ, DataFetcher
+    from .trading_calendar import TradingDayStatus
+
+    now = now or datetime.datetime.now(CN_TZ)
+    day = now.astimezone(CN_TZ).date()
+    status = (fetcher or DataFetcher()).a_share_trading_day_status(day)
+    if status is TradingDayStatus.OPEN:
+        print(f"交易日门禁：{day} 已确认开市，继续 {session}")
+        return True
+    label = "休市" if status is TradingDayStatus.CLOSED else "交易日状态未知"
+    print(f"交易日门禁：{day} {label}，静默跳过 {session} 推送")
+    return False
 
 
 def _build_strategy(name: str):
@@ -185,6 +202,9 @@ def cmd_notify_daily(args):
 def cmd_notify_morning_execution(args):
     from .v3 import cloud_available, notify_morning_execution
 
+    if not _notification_trading_day_gate("10:30"):
+        return
+
     try:
         reports = cmd_daily(args)
     except Exception as error:
@@ -199,6 +219,8 @@ def cmd_notify_morning_execution(args):
 
 def cmd_notify_intraday(args):
     from .v3 import notify_intraday
+    if not _notification_trading_day_gate("14:35"):
+        return
     path = notify_intraday()
     print(f"14:35尾盘执行策略已推送：{path}")
 
@@ -215,6 +237,43 @@ def cmd_advice_recalculate(args):
         executions=TradingService().repository.list_executions(),
     )
     print(render_summary(summary))
+
+
+def cmd_monthly_review(args):
+    from .cloud_state import CloudStateStore
+    from .config import REPORT_DIR
+    from .data.fetcher import CN_TZ, DataFetcher
+    from .monthly_review import build_monthly_review, months_for_review, write_monthly_review
+    from .models import Market
+    from .trading.service import TradingService
+
+    state, _ = CloudStateStore().load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
+    records = state.get("advice_records", [])
+    months = months_for_review(records, args.month, args.backfill)
+    if not months:
+        print("没有可回填的 advice history")
+        return
+    output_dir = args.output_dir or REPORT_DIR
+    executions = TradingService().repository.list_executions()
+    fetcher = DataFetcher()
+    cutoff = datetime.datetime.now(CN_TZ).date()
+    for month in months:
+        selected = [row for row in records if str(row.get("as_of", "")).startswith(month)]
+        market_data = {}
+        for row in selected:
+            code = str(row.get("code", ""))
+            if not code or code in market_data:
+                continue
+            try:
+                market = Market[row.get("market", "ETF")]
+            except (KeyError, TypeError):
+                market = Market.ETF
+            first = datetime.datetime.strptime(month, "%Y-%m").date()
+            age = max(90, (cutoff - first).days + 45)
+            market_data[code] = fetcher.fetch_hist(code, market, days=age)
+        report = build_monthly_review(records, executions, market_data, month, cutoff)
+        csv_path, md_path = write_monthly_review(report, output_dir)
+        print(f"{month} 月度复盘已生成：{csv_path}；{md_path}")
 
 
 def cmd_backtest(args):
@@ -488,6 +547,14 @@ def main():
 
     p_perf = sub.add_parser("advice-recalculate", help="从私有原始建议与市场日线重算统计")
     p_perf.set_defaults(func=cmd_advice_recalculate)
+
+    p_monthly = sub.add_parser("monthly-review", help="从原始建议、成交和日线重算月度策略复盘")
+    monthly_mode = p_monthly.add_mutually_exclusive_group(required=True)
+    monthly_mode.add_argument("--month", help="指定月份 YYYY-MM")
+    monthly_mode.add_argument("--backfill", action="store_true", help="回填 advice history 中全部月份")
+    p_monthly.add_argument("--output-dir", type=Path,
+                           help="输出目录（默认 data/reports）")
+    p_monthly.set_defaults(func=cmd_monthly_review)
 
     p_bt = sub.add_parser("backtest", help="单标的策略回测")
     p_bt.add_argument("code", help="股票代码，如 600519（A股6位）/ 00700（港股5位）")

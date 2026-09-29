@@ -19,6 +19,7 @@ import akshare as ak
 from ..config import CACHE_DIR
 from ..models import Market
 from ..asset_routing import classify_asset_subtype
+from ..trading_calendar import TradingDayStatus, bundled_status, status_from_dates
 
 
 # A股收盘以北京时间为准；部署在 UTC 容器/CI 上时本地时区会错位 8 小时
@@ -41,6 +42,12 @@ def cached_trade_dates() -> Optional[set]:
         except Exception:
             _CALENDAR_CACHE = None
     return _CALENDAR_CACHE
+
+
+def _cached_trade_date_objects() -> set[datetime.date]:
+    return {
+        datetime.date.fromisoformat(value) for value in (cached_trade_dates() or set())
+    }
 
 
 def _atomic_write_csv(path: Path, df: pd.DataFrame) -> None:
@@ -191,20 +198,23 @@ class DataFetcher:
 
     @staticmethod
     def _last_completed_trading_day() -> datetime.date:
-        """最近一个已收盘的交易日：北京时间 16:00 为界，优先用交易日历识别节假日。"""
+        """最近一个已收盘的确认交易日；未知日期不以周一至周五冒充。"""
         now = datetime.datetime.now(CN_TZ)
         d = now.date()
         if now.hour < 16:
             d -= datetime.timedelta(days=1)
-        trade_dates = cached_trade_dates()
-        if trade_dates is not None:
-            floor = d - datetime.timedelta(days=40)
-            while d.isoformat() not in trade_dates and d > floor:
-                d -= datetime.timedelta(days=1)
-            return d
-        while d.weekday() >= 5:
+        cached = _cached_trade_date_objects()
+        floor = d - datetime.timedelta(days=40)
+        while d > floor:
+            status = status_from_dates(d, cached)
+            if status is TradingDayStatus.UNKNOWN:
+                status = bundled_status(d)
+            if status is TradingDayStatus.OPEN:
+                return d
             d -= datetime.timedelta(days=1)
-        return d
+        # Conservative staleness threshold when no calendar can establish a
+        # recent session. Notification paths are already blocked as UNKNOWN.
+        return floor
 
     def _maybe_refresh_trade_calendar(self) -> None:
         """交易日历缺失或覆盖不足半年时联网刷新（只在本方法内发生）。"""
@@ -231,7 +241,27 @@ class DataFetcher:
             _CALENDAR_CACHE = set(frame["trade_date"])
             _CALENDAR_LOADED = True
         except Exception as e:
-            print(f"  交易日历缓存写入失败({e})，继续用工作日近似")
+            print(f"  交易日历缓存写入失败({e})，不会把未知日期当作交易日")
+
+    def a_share_trading_day_status(self, day: datetime.date,
+                                   refresh: bool = True) -> TradingDayStatus:
+        """Resolve an A-share session from cache/bundled notices, failing closed.
+
+        The local AkShare/Sina cache is checked first.  Bundled complete annual
+        exchange closure plans cover fresh CI checkouts.  Only dates outside all
+        known coverage trigger a refresh; failure remains UNKNOWN.
+        """
+        cached = _cached_trade_date_objects()
+        status = status_from_dates(day, cached)
+        if status is not TradingDayStatus.UNKNOWN:
+            return status
+        status = bundled_status(day)
+        if status is not TradingDayStatus.UNKNOWN:
+            return status
+        if refresh:
+            self._maybe_refresh_trade_calendar()
+            return status_from_dates(day, _cached_trade_date_objects())
+        return TradingDayStatus.UNKNOWN
 
     def fetch_hist(self, code: str, market: Market, period: str = "daily",
                    days: int = 120) -> Optional[pd.DataFrame]:
