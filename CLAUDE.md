@@ -51,6 +51,12 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 # 13. 月度策略复盘（原始建议 + 显式关联成交 + 真实交易日日线重算）
 .venv\Scripts\python.exe -m quant_assistant monthly-review --month 2026-09
 .venv\Scripts\python.exe -m quant_assistant monthly-review --backfill
+
+# 14. ETF V2：主动扫描未持有ETF并给新增资金候选（省略--funds则使用账户现金）
+.venv\Scripts\python.exe -m quant_assistant etf-v2-daily --funds 20000
+
+# 15. ETF V2 walk-forward回测与后30%样本外验证
+.venv\Scripts\python.exe -m quant_assistant backtest-etf-v2 --days 3650
 ```
 
 输出位置：终端摘要 + `data/reports/` 下的 HTML（dashboard.html、backtest_*.html，回测报告带时间戳不覆盖）。
@@ -64,6 +70,7 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `quant_assistant/asset_routing.py` | 持仓资产子类型识别与展示角色（完全离线） |
 | `quant_assistant/trading/` | 成交业务、Repository 接口与本地 SQLite 实现（完全离线） |
 | `quant_assistant/backtest/` | 回测引擎、指标计算、HTML 报告 |
+| `quant_assistant/etf_v2/` | V2主动ETF扫描、新资金约束配置、模拟账户与样本外验证 |
 | `quant_assistant/screening/` | 观察池、过滤器、评分 |
 | `quant_assistant/config.py` | 所有手工维护的配置（见下） |
 | `data/trading.sqlite3` | 本地初始快照与成交事实源 |
@@ -72,6 +79,8 @@ python3 -m quant_assistant backtest-portfolio --start 2016-01-01
 | `data/cache/` | 行情长期缓存（`{code}_daily.csv`，历史只增不减） |
 
 用户可见推送只有工作日北京时间 10:30 早盘执行策略和 14:35 尾盘执行策略。09:20 不再推送；日K、新闻等准备代码仍可作为 10:30 的内部输入。规则层产生全部价格、限价参考与仓位数字；可选 OpenAI provider 仅压缩文字和排序。
+
+10:30 原持仓执行卡之后会追加一条 ETF V2 新资金配置卡。V2 不修改原持仓动作或周度交易清单；它独立扫描 `ETF_V2_UNIVERSE`，运行时校验流动性和数据新鲜度，并允许全部保留现金。单ETF、单行业和总权益上限只约束新增资金。模拟账户建议日不成交，下一可用交易日开盘才计入滑点和佣金。完整口径见 `docs/DESIGN-etf-v2.md`。
 
 这里的“工作日”必须由 A 股交易所日历确认，不等同于周一至周五。通知命令在任何报告、advice_session 或 Telegram 操作之前执行强门禁；休市和 `unknown` 都以退出码 0 静默跳过。运行时交易日缓存来自 AkShare/Sina 交易日接口（唯一联网仍在 `data/fetcher.py`），2024–2026 年上交所年度休市安排作为随代码审计的离线基线。调休上班的周末仍不开盘。
 
@@ -104,6 +113,7 @@ MA5 上方乖离不再单独等同持续过热。`single_day_momentum_burst` 表
 | 行业估值中枢 `SECTOR_BENCHMARKS` | `config.py` | 极少动 |
 | 禁止池 `FORBIDDEN_POOL` | `config.py` | 财务爆雷/ST 标的加入 |
 | ETF 池 `ETF_POOL` | `config.py` | 只维护场内 ETF 元数据 |
+| V2 ETF 机会池 `ETF_V2_UNIVERSE` | `config.py` | 维护候选元数据；实际流动性每天按成交额复核 |
 | ETF 战略中枢 `TARGET_WEIGHTS` | `config.py` | 调整权重即改规则，需在 commit 写理由 |
 | 周度策略参数 `STRATEGY_PARAMS` | `config.py` | 均线/动量/再平衡/断路器/迁移/交易阈值集中维护 |
 | 观察池 `A_SHARE_WATCHLIST` | `screening/universe.py` | 增删候选标的 |

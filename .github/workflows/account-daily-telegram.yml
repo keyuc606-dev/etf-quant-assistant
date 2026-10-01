@@ -51,6 +51,15 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
         run: python -m quant_assistant notify-morning-execution
 
+      - name: Scan ETF opportunities and send V2 allocation card
+        env:
+          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
+          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
+          ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m quant_assistant notify-etf-v2
+
       - name: Remove sensitive runtime files
         if: always()
         shell: bash
@@ -62,3 +71,4 @@ jobs:
           rm -f data/reports/my-portfolio-morning-execution.md
           rm -f data/reports/my-portfolio-morning-execution-detail.md
           rm -f data/reports/my-portfolio-intraday.md
+          rm -f data/reports/etf-v2-daily.md data/reports/etf-v2-detail.md

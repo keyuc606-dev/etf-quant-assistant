@@ -13,6 +13,7 @@
 | 回撤断路器、趋势过滤、数据陈旧门禁等风控 | 保证收益 |
 | 持仓风控告警、存量持仓分批迁移计划 | 高频/日内交易 |
 | 10:30/14:35 生成最多 5 条可执行挂单/风险复核，可选 AI 压缩说明 | AI 凭空报价或自动下单 |
+| 主动扫描未持有 ETF，为新增资金给出受约束候选或保留现金 | 为弥补历史亏损强行交易 |
 
 **诚实的预期**：回测（2016–2026，累计净值口径——按净值成交、不含场内溢折价，且 QDII 溢价闸门在该模式不生效，应视为理想成交假设下的**上界**；`backtest-portfolio --market` 可跑场内价格口径对照）年化约 5%，最大回撤约 6%，2018/2022 熊市回撤 4.4%/1.9%（同期沪深300 为 28.8%/24.7%）。另注意：512890 于 2018 年末上市，更早区间以 510300 数据替代（回测报告 notes 中有显式标注）；标的池为事后选定，存在生存者偏差。这套系统的价值是**低回撤和纪律执行**，不是收益最大化——周报里常年显示与「50%红利低波+50%国债 持有不动」的对照线，让它自己证明存在价值。
 
@@ -77,6 +78,8 @@ cp data/portfolio.example.json data/portfolio.json
 | `python -m quant_assistant monthly-review --month 2026-09` | 从原始建议、成交与日线重算 CSV + Markdown 月报 | 月度复盘 |
 | `python -m quant_assistant monthly-review --backfill` | 尽可能回填已有 advice history 的全部月份 | 历史兼容复盘 |
 | `python -m quant_assistant screen` | A 股观察池多因子筛选 | 研究用 |
+| `python -m quant_assistant etf-v2-daily --funds 20000` | 主动扫描 ETF，并按现有组合与风险上限配置新增资金；省略 `--funds` 时使用账户现金 | 每交易日 |
+| `python -m quant_assistant backtest-etf-v2` | V2 walk-forward 回测、后30%样本外验证、宽基对照和交易成本统计 | 验证规则时 |
 
 ### 周度工作流（每周 10 分钟）
 
@@ -115,6 +118,10 @@ schtasks /create /tn "quant-weekly" /sc weekly /d FRI /st 16:30 `
 
 完整设计与回测验收标准见 [docs/DESIGN-etf-weekly.md](docs/DESIGN-etf-weekly.md)。
 
+### V2 新资金助手
+
+V2 与原周度战略池并行，不替换旧策略。它对一组流动性较好的宽基、行业、境外、债券和黄金 ETF 做运行时流动性复核，再综合趋势、动量、波动/回撤、市场环境及与现有组合的相关性评分。配置同时受单 ETF 15%、单行业 25%、总权益 60% 和单次最多 3 只约束；任何一关不通过都可以把全部资金留在现金。历史成本和浮亏不进入评分。完整口径见 [docs/DESIGN-etf-v2.md](docs/DESIGN-etf-v2.md)。
+
 ### 数据源与离线模式
 
 - 行情：akshare（东财），**免费无 key**；每标的一份长期缓存，历史只增不减；交易日历缓存自动维护（识别 A 股节假日，北京时间 16:00 收盘界）；
@@ -129,7 +136,7 @@ schtasks /create /tn "quant-weekly" /sc weekly /d FRI /st 16:30 `
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests/ -q     # 67 项：撮合/费用/断路器/迁移限速/数据容错/指标边界/市价模式/HTML转义
+.venv/bin/python -m pytest tests/ -q     # 全量：撮合/费用/断路器/V2约束与样本外验证/数据容错等
 ```
 
 ## 目录结构
@@ -142,6 +149,7 @@ quant_assistant/
 ├── rebalance/           # 交易清单生成（取整/现金约束/费用/迁移限速）
 ├── weekly.py            # 周报生成/心跳/清单核对/基准对照
 ├── backtest/            # 单标的引擎 + 组合级引擎 + HTML 报告
+├── etf_v2/              # 主动扫描/新资金配置/样本外回测/模拟账户
 ├── portfolio/           # 持仓/风控规则/告警/建议
 ├── data/fetcher.py      # 唯一联网入口（缓存与离线降级）
 ├── screening/           # A股观察池多因子筛选

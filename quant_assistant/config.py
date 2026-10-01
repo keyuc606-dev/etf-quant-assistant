@@ -24,6 +24,49 @@ ETF_POOL = {
     "513500": {"name": "标普500ETF", "layer": "分散", "role": "海外权益"},
 }
 
+# V2 主动机会池。它与上面的周度战略池彼此独立：ETF_POOL 继续服务原有的
+# 低回撤战略配置，ETF_V2_UNIVERSE 只用于“新增资金今天是否值得配置”的扫描。
+# 流动性不靠这份静态名单拍脑袋判断，运行时仍须通过近 20 日成交额门槛。
+ETF_V2_UNIVERSE = {
+    "510300": {"name": "沪深300ETF", "asset_class": "A股宽基", "sector": "宽基", "equity": True},
+    "510500": {"name": "中证500ETF", "asset_class": "A股宽基", "sector": "宽基", "equity": True},
+    "512890": {"name": "红利低波ETF", "asset_class": "A股策略", "sector": "红利低波", "equity": True},
+    "561550": {"name": "中证500增强ETF", "asset_class": "A股宽基", "sector": "宽基", "equity": True},
+    "512480": {"name": "半导体ETF", "asset_class": "A股行业", "sector": "半导体", "equity": True},
+    "515880": {"name": "通信ETF", "asset_class": "A股行业", "sector": "通信", "equity": True},
+    "512400": {"name": "有色金属ETF", "asset_class": "A股行业", "sector": "有色", "equity": True},
+    "516020": {"name": "化工ETF", "asset_class": "A股行业", "sector": "化工", "equity": True},
+    "159851": {"name": "金融科技ETF", "asset_class": "A股行业", "sector": "金融科技", "equity": True},
+    "159782": {"name": "双创50ETF", "asset_class": "A股成长", "sector": "科技成长", "equity": True},
+    "513010": {"name": "恒生科技ETF", "asset_class": "境外权益", "sector": "港股科技", "equity": True},
+    "513100": {"name": "纳指ETF", "asset_class": "境外权益", "sector": "美股科技", "equity": True},
+    "513500": {"name": "标普500ETF", "asset_class": "境外权益", "sector": "美股宽基", "equity": True},
+    "159866": {"name": "日经ETF", "asset_class": "境外权益", "sector": "日本权益", "equity": True},
+    "511010": {"name": "国债ETF", "asset_class": "债券", "sector": "债券", "equity": False},
+    "511360": {"name": "短融ETF", "asset_class": "现金替代", "sector": "现金管理", "equity": False},
+    "518880": {"name": "黄金ETF", "asset_class": "商品", "sector": "黄金", "equity": False},
+}
+
+# V2 参数只约束新增资金，不改写历史盈亏，也不触发卖出。
+ETF_V2_PARAMS = {
+    "lookback_days": 420,
+    "min_history_days": 120,
+    "liquidity_window": 20,
+    "min_avg_amount": 20_000_000.0,
+    "min_candidate_score": 60.0,
+    "max_candidates": 3,
+    "single_etf_max": 0.15,
+    "single_sector_max": 0.25,
+    "total_equity_max": 0.60,
+    "lot_size": 100,
+    "commission_rate": 0.00025,
+    "min_commission": 5.0,
+    "slippage_rate": 0.001,
+    "benchmark_code": "510300",
+    "correlation_window": 60,
+    "max_data_age_days": 7,
+}
+
 # 战略中枢权重。A 股腿和海外腿会在 Phase 2 由动量规则选择实际持有标的；
 # 这里给出一组可求和为 100% 的默认中枢模板，未入选候选在规则层权重为 0。
 TARGET_WEIGHTS = {

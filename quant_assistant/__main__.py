@@ -439,6 +439,43 @@ def cmd_weekly(args):
     cmd_plan(args)
 
 
+def cmd_etf_v2_daily(args):
+    from .etf_v2.service import build_daily
+
+    result = build_daily(investable_cash=args.funds)
+    print(result["compact"].read_text(encoding="utf-8"))
+    print(f"详细报告: {result['detail']}")
+    if result["warnings"]:
+        print(f"数据警告: {len(result['warnings'])}项；详见候选审计，缺失标的不参与配置")
+
+
+def cmd_notify_etf_v2(args):
+    from .etf_v2.service import build_daily, notify_daily
+
+    if not _notification_trading_day_gate("ETF V2"):
+        return
+    result = build_daily(investable_cash=args.funds)
+    notify_daily(result)
+    print(f"ETF V2 Telegram 推送成功: {result['compact']}")
+
+
+def cmd_backtest_etf_v2(args):
+    from .config import ETF_V2_UNIVERSE, REPORT_DIR
+    from .data.fetcher import DataFetcher
+    from .etf_v2.backtest import run_walk_forward, write_backtest
+
+    fetcher = DataFetcher()
+    market_data = {}
+    for code in ETF_V2_UNIVERSE:
+        frame = fetcher.fetch_hist(code, Market.ETF, days=args.days)
+        if frame is not None and not frame.empty:
+            market_data[code] = frame
+    result = run_walk_forward(market_data, initial_capital=args.capital)
+    path = write_backtest(result, REPORT_DIR)
+    print(path.read_text(encoding="utf-8"))
+    print(f"回测报告: {path}")
+
+
 def cmd_record_trade(args):
     from .data.fetcher import DataFetcher
     from .trading.service import TradingService
@@ -586,6 +623,19 @@ def main():
 
     p_weekly = sub.add_parser("weekly", help="ETF 周报与本周交易清单")
     p_weekly.set_defaults(func=cmd_weekly)
+
+    p_v2 = sub.add_parser("etf-v2-daily", help="ETF V2主动扫描与新增资金候选配置")
+    p_v2.add_argument("--funds", type=float, help="本次可投资闲置资金；默认使用账户现金")
+    p_v2.set_defaults(func=cmd_etf_v2_daily)
+
+    p_v2_notify = sub.add_parser("notify-etf-v2", help="生成ETF V2日报并推送Telegram")
+    p_v2_notify.add_argument("--funds", type=float, help="本次可投资闲置资金；默认使用账户现金")
+    p_v2_notify.set_defaults(func=cmd_notify_etf_v2)
+
+    p_v2_bt = sub.add_parser("backtest-etf-v2", help="ETF V2 walk-forward回测与样本外验证")
+    p_v2_bt.add_argument("--days", type=int, default=3650, help="历史回看自然日数（默认3650）")
+    p_v2_bt.add_argument("--capital", type=float, default=100_000, help="初始资金（默认10万）")
+    p_v2_bt.set_defaults(func=cmd_backtest_etf_v2)
 
     p_trade = sub.add_parser("record-trade", help="将人工确认的 ETF 成交写入本地台账")
     p_trade.add_argument("side", choices=["BUY", "SELL"], help="成交方向")
