@@ -15,6 +15,9 @@ from .analysis.ma_discipline import (compact_ma_note, intraday_ma_discipline,
 from .analysis.final_decision import build_intraday_final_decision, economics_text
 from .asset_routing import BOND_ETF, QDII_ETF, subtype_for
 from .data.fetcher import CN_TZ, DataFetcher
+from .analysis.market_filter import (execution_evidence, market_environment, previous_session,
+                                     completed_frame)
+from .config import MARKET_FILTER_PARAMS
 from .models import Market
 from .portfolio.holdings import PortfolioManager
 from .trading.service import TradingService
@@ -176,9 +179,6 @@ def _decision_confidence(decision: dict, status: str, ma: dict) -> str:
     action = decision.get("final_action")
     if action == "RISK_EXIT" and status == "已失效":
         return "HIGH" if "MA20有效跌破" in ma.get("ma_state", "") else "MEDIUM"
-    if action == "REDUCE" and ("MA20有效跌破" in ma.get("ma_state", "") or
-                               ma.get("ma_state") == "persistent_overheat"):
-        return "HIGH"
     return decision.get("decision_confidence") or {
         "高": "HIGH", "中": "MEDIUM", "低": "LOW"
     }.get(decision.get("confidence"), "LOW")
@@ -208,6 +208,35 @@ def _render_order_range(value) -> str:
     return f"{_price_text(value[0])}–{_price_text(value[1])}"
 
 
+def _execution_market(fetcher, now):
+    """Reuse existing free ETF providers; missing/stale proxies fail closed."""
+    quotes, frames = {}, {}
+    cutoff = previous_session(now.astimezone(CN_TZ).date())
+    for code in MARKET_FILTER_PARAMS["benchmarks"]:
+        try:
+            quotes[code] = fetcher.fetch_intraday_quote(code, Market.ETF, now)
+        except Exception:
+            quotes[code] = None
+        try:
+            frames[code] = completed_frame(fetcher.fetch_hist(code, Market.ETF, days=90), cutoff) if cutoff else None
+        except Exception:
+            frames[code] = None
+    environment = market_environment(quotes, now.astimezone(CN_TZ))
+    return environment, frames, quotes
+
+
+def _account_limits(positions, cash):
+    complete = all(_positive(getattr(pos, "shares", None)) is not None and
+                   _positive(getattr(pos, "current_price", None)) is not None for pos in positions)
+    values = [(_positive(getattr(pos, "shares", 0)) or 0) * (_positive(getattr(pos, "current_price", 0)) or 0) *
+              (_positive(getattr(pos, "fx_rate", 1)) or 1) for pos in positions]
+    total = sum(values) + cash
+    # Count all equity, including QDII/HK, in the exposure cap.
+    equity = sum(value for pos, value in zip(positions, values)
+                 if subtype_for(pos) in {"STOCK", "EQUITY_ETF", "QDII_ETF"})
+    return total, equity / total if total > 0 and complete else None
+
+
 def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
                             quality: dict | None = None,
                             detail: list[str] | None = None) -> str:
@@ -217,6 +246,10 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
     advices = {row["code"]: row for row in reports["advices"]}
     candidates = []
     degraded = []
+    environment, benchmark_frames, benchmark_quotes = _execution_market(fetcher, now)
+    positions = [view["position"] for view in reports["views"]]
+    cash = float(reports.get("execution_cash", 0))
+    total_assets, equity_exposure = _account_limits(positions, cash)
     for view in reports["views"]:
         pos = view["position"]
         advice = advices[pos.code]
@@ -240,7 +273,15 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
                                  record.get("asset_subtype"))
         ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
         ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
-        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma)
+        evidence = execution_evidence(pos, record, ma_quote, ma, environment,
+                                      benchmark_frames, benchmark_quotes, now.astimezone(CN_TZ))
+        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma,
+                                                 evidence, total_assets, cash, equity_exposure)
+        if decision.get("final_action") == "ADD" and decision.get("suggested_amount"):
+            reserved = decision["suggested_amount"] * 1.002 + 5
+            cash = max(0, cash - reserved)
+            if equity_exposure is not None and total_assets > 0:
+                equity_exposure += reserved / total_assets
         decision["data_quality"] = data_quality
         decision["decision_confidence"] = _decision_confidence(decision, verdict["status"], ma)
         decision["confidence"] = _LEVEL_ZH[decision["decision_confidence"]]
@@ -260,7 +301,8 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
                 f"### {pos.name} {pos.code}\n{quote.get('as_of', '时间未标注')} "
                 f"{quote.get('source', '未知源')} provisional；状态 {verdict['status']}；"
                 f"数据 {data_quality}；决策 {decision['decision_confidence']}；"
-                f"均线 {compact_ma_note(ma)}。"
+                f"均线 {compact_ma_note(ma)}；市场 {decision.get('market_regime')}；"
+                f"相对强弱 {decision.get('relative_strength_state')}；原因 {decision['action_reason']}。"
             )
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:5]
@@ -292,6 +334,7 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
     if degraded:
         lines.append(f"其中{len(degraded)}只因数据质量低已折叠，不给强执行动作。")
     lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
+    lines.append(f"市场环境：{environment['market_regime']}；市场宽度缺失时仅使用指数代理。")
     return "\n".join(lines)
 
 
@@ -383,6 +426,9 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
     morning = {r["code"]: r for r in records if r["as_of"] == day}
     rows = []
     degraded = []
+    environment, benchmark_frames, benchmark_quotes = _execution_market(fetcher, now)
+    cash = _positive(getattr(pm, "cash", 0)) or 0.0
+    total_assets, equity_exposure = _account_limits(pm.positions, cash)
     for pos in pm.positions:
         quote = fetcher.fetch_intraday_quote(pos.code, pos.market, now)
         if quote is None or not quote.get("provisional"):
@@ -402,6 +448,9 @@ def build_intraday(pm, records: list[dict], fetcher, now: dt.datetime,
             ma_result = {}
         verdict["final_decision"] = build_intraday_final_decision(
             pos, advice, quote, verdict["status"], ma_result,
+            execution_evidence(pos, advice or {}, {**quote, "session_progress": _market_progress(quote.get("as_of"))},
+                               ma_result, environment, benchmark_frames, benchmark_quotes, now.astimezone(CN_TZ)),
+            total_assets, cash, equity_exposure,
         )
         rows.append((verdict["priority"], verdict["distance_atr"], pos.code,
                      pos, quote, advice, verdict, subtype))
@@ -525,6 +574,9 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
     candidates = []
     degraded = []
     fresh_count = 0
+    environment, benchmark_frames, benchmark_quotes = _execution_market(fetcher, now)
+    cash = _positive(getattr(pm, "cash", 0)) or 0.0
+    total_assets, equity_exposure = _account_limits(pm.positions, cash)
     for pos in pm.positions:
         quote = fetcher.fetch_intraday_quote(pos.code, pos.market, now)
         record = morning.get(pos.code)
@@ -541,7 +593,15 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
                                  record.get("asset_subtype"))
         ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
         ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
-        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma)
+        evidence = execution_evidence(pos, record, ma_quote, ma, environment,
+                                      benchmark_frames, benchmark_quotes, now.astimezone(CN_TZ))
+        decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma,
+                                                 evidence, total_assets, cash, equity_exposure)
+        if decision.get("final_action") == "ADD" and decision.get("suggested_amount"):
+            reserved = decision["suggested_amount"] * 1.002 + 5
+            cash = max(0, cash - reserved)
+            if equity_exposure is not None and total_assets > 0:
+                equity_exposure += reserved / total_assets
         decision["data_quality"] = data_quality
         decision["decision_confidence"] = _decision_confidence(decision, verdict["status"], ma)
         if data_quality == "LOW":
@@ -570,7 +630,9 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
             detail.append(
                 f"### {pos.name} {pos.code}\n状态 {verdict['status']}；早盘 {original}；"
                 f"尾盘 {current}；变更 {change}；数据 {data_quality}；"
-                f"决策 {decision['decision_confidence']}；均线 {compact_ma_note(ma)}。"
+                f"决策 {decision['decision_confidence']}；均线 {compact_ma_note(ma)}；"
+                f"市场 {decision.get('market_regime')}；基准 {decision.get('benchmark_code')}；"
+                f"相对强弱 {decision.get('relative_strength_state')}；原因 {decision['action_reason']}。"
             )
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:5]
@@ -605,6 +667,7 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
     if degraded:
         lines.append(f"其中{len(degraded)}只实时数据不可用，已折叠且未用昨收冒充。")
     lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
+    lines.append(f"市场环境：{environment['market_regime']}；详细相对强弱见附件。")
     return "\n".join(lines)
 
 

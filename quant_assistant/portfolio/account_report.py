@@ -11,6 +11,7 @@ from ..analysis.indicators import add_all_indicators, get_signals
 from ..analysis.account_advice import build_rule_advices
 from ..analysis.discipline import build_discipline, cash_defense, short_note
 from ..analysis.ma_discipline import build_ma_discipline, compact_ma_note
+from ..analysis.market_filter import execution_evidence, history_facts
 from ..analysis.final_decision import build_final_decision, economics_text
 from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
                              role_label, subtype_for, subtype_label)
@@ -303,12 +304,19 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
             advice["confidence"] = "低"
             advice["confidence_note"] += "、建议与纪律冲突"
         view = next(item for item in views if item["position"].code == advice["code"])
+        view["equity_exposure"] = sum(item["weight"] for item in views
+            if item.get("asset_subtype") in {"STOCK", "EQUITY_ETF", "QDII_ETF"})
+        facts = history_facts(stock_data.get(advice["code"]))
+        view["execution_evidence"] = execution_evidence(view["position"], {
+            **facts, "technical_features": view["indicators"],
+            "invalidation_price": advice.get("stop")},
+            {"price": view["position"].current_price}, ma)
         decision = build_final_decision(
             view, advice, disciplines[advice["code"]], ma,
             total_assets=pm.total_assets, cash=pm.cash,
         )
         decision["data_quality"] = advice["data_quality"]
-        if decision["final_action"] != "MANUAL_REVIEW" and not advice["display_conflict"]:
+        if not decision.get("trend_break_candidate") and decision["final_action"] != "MANUAL_REVIEW" and not advice["display_conflict"]:
             decision["decision_confidence"] = advice["decision_confidence"]
         if advice["data_quality"] == "LOW" or advice["display_conflict"]:
             decision["decision_confidence"] = "LOW"
@@ -332,7 +340,7 @@ def generate_account_reports(pm, stock_data: Optional[Dict[str, object]] = None,
     telegram_path.write_text(telegram, encoding="utf-8")
     return {"daily": daily_path, "detail": detail_path, "focus_count": len(focus),
             "telegram": telegram_path,
-            "advices": advices, "views": views, "stock_data": stock_data,
+            "advices": advices, "views": views, "stock_data": stock_data, "execution_cash": pm.cash,
             "advice_mode": advice_mode, "disciplines": disciplines,
             "ma_disciplines": ma_disciplines,
             "final_decisions": {item["code"]: {

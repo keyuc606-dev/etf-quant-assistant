@@ -13,6 +13,7 @@ from .data.fetcher import CN_TZ
 from .asset_routing import ROUTING_VERSION, subtype_for
 from .analysis.ma_discipline import VERSION as MA_DISCIPLINE_VERSION
 from .analysis.final_decision import VERSION as FINAL_DECISION_VERSION
+from .analysis.market_filter import DIAGNOSTIC_FIELDS, history_facts, completed_frame, previous_session
 
 
 WINDOWS = (5, 10, 20)
@@ -53,7 +54,12 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str,
             "conflict_note", "reduction_reason_type", "t_economics",
             "manual_confirmation_required",
         )}
+        cutoff = previous_session(generated_at.astimezone(CN_TZ).date())
+        facts = history_facts(completed_frame(frame, cutoff))
+        diagnostics = {key: advice.get(key) for key in DIAGNOSTIC_FIELDS}
+        final_decision.update(diagnostics)
         records.append({
+            **facts, **diagnostics,
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
             "advice_session": advice_session,

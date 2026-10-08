@@ -11,6 +11,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from .analysis.market_filter import DIAGNOSTIC_FIELDS
 from .advice_performance import WINDOWS, correlate_execution, evaluate
 
 
@@ -18,6 +19,7 @@ ACTIONS = ("ADD", "REDUCE", "RISK_EXIT", "HOLD", "NO_ACTION", "MANUAL_REVIEW")
 COMPLETE_FIELDS = (
     "final_action", "final_decision_version", "data_quality", "decision_confidence",
     "asset_subtype", "suggested_quantity", "reference_close", "advice_session",
+    "market_filter_version", "market_regime", "relative_strength_state",
 )
 
 
@@ -227,6 +229,13 @@ def build_monthly_review(records: list[dict], executions: list[dict],
             "suggested_quantity": int(record.get("suggested_quantity") or 0),
             "suggested_amount": float(record.get("suggested_amount") or 0),
         }
+        row.update({key: record.get(key) for key in DIAGNOSTIC_FIELDS})
+        present = all(record.get(key) is not None for key in
+                      ("market_filter_version", "market_regime", "relative_strength_state"))
+        row["filter_record_quality"] = ("complete" if present else "partial" if any(
+            record.get(key) is not None for key in DIAGNOSTIC_FIELDS) else "legacy")
+        row["final_decision_version"] = record.get("final_decision_version") or "legacy/unknown"
+        row["final_action"] = action
         for horizon in WINDOWS:
             window = outcome["windows"].get(str(horizon), {"status": "pending", "sessions": 0})
             row[f"window_{horizon}_status"] = window.get("status", "pending")
@@ -262,6 +271,10 @@ def build_monthly_review(records: list[dict], executions: list[dict],
         "by_data_quality": _group(rows, "data_quality"),
         "by_asset_subtype": _group(rows, "asset_subtype"),
         "by_rule_version": _group(rows, "rule_version"),
+        "by_market_regime": _group(rows, "market_regime"),
+        "by_relative_strength": _group(rows, "relative_strength_state"),
+        "by_ma20_break_only": _group(rows, "ma20_break_only"),
+        "by_final_decision_version": _group(rows, "final_decision_version"),
         "comparison": {
             "system_advice_20d": _mean(row["directional_20d_return"] for row in rows),
             "actual_execution_return": _mean(row["realized_return"] for row in actual),
@@ -345,7 +358,10 @@ def render_markdown(report: dict) -> str:
     for title, key in (("decision_confidence", "by_decision_confidence"),
                        ("data_quality", "by_data_quality"),
                        ("asset_subtype", "by_asset_subtype"),
-                       ("rule_version", "by_rule_version")):
+                       ("rule_version", "by_rule_version"),
+                       ("market_regime", "by_market_regime"),
+                       ("relative_strength_state", "by_relative_strength"),
+                       ("ma20_break_only", "by_ma20_break_only")):
         lines.append(f"### {title}")
         lines.append("")
         for name, item in report[key].items():

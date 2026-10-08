@@ -7,7 +7,8 @@ from typing import Any
 
 from ..asset_routing import (BOND_ETF, COMMODITY_ETF, GOLD_ETF, QDII_ETF,
                              subtype_for)
-from ..config import FINAL_DECISION_PARAMS
+from ..config import FINAL_DECISION_PARAMS, MARKET_FILTER_PARAMS
+from .market_filter import execution_evidence, DIAGNOSTIC_FIELDS
 
 
 VERSION = FINAL_DECISION_PARAMS["version"]
@@ -157,6 +158,81 @@ def _sell_size(position, price: float, fraction: float) -> tuple[int, float, flo
 
 def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
                          total_assets: float = 0.0, cash: float = 0.0) -> dict:
+    evidence = view.get("execution_evidence") or execution_evidence(
+        view["position"], {"technical_features": view.get("indicators", {}),
+                          "invalidation_price": advice.get("stop")},
+        {"price": view["position"].current_price}, ma)
+    decision = _build_final_decision(view, advice, discipline, ma, total_assets, cash, evidence)
+    return {**decision, **{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}}
+
+
+def _risk_filter_decision(position, price, evidence):
+    confirmations = evidence.get("sell_confirmations") or []
+    if not confirmations:
+        broad = evidence.get("market_regime") == "BROAD_SELLOFF"
+        reason = ("大盘普跌，标的相对抗跌，MA20单独破位不足以减仓" if broad and
+                  evidence.get("relative_strength_state") in ("REL_NEUTRAL", "REL_STRONG") else
+                  "MA20单独破位仅为风险警报，额外确认不足，持有等待修复；禁止加仓")
+        return _decision("HOLD", reason, "低", "等待支撑、相对强弱与量价确认",
+                         "失效位或关键支撑破坏则重新评估")
+    high = (("RELATIVE_WEAK" in confirmations and "SUPPORT_BREAK" in confirmations) or
+            "INDEPENDENT_WEAK" in confirmations or len(confirmations) >= 3)
+    # A degraded style benchmark cannot justify HIGH relative-weak confidence alone.
+    if evidence.get("benchmark_degraded") and "SUPPORT_BREAK" not in confirmations:
+        high = False
+    qty, amount, fraction = _sell_size(position, price, FINAL_DECISION_PARAMS["risk_reduce_fraction"])
+    reason = ("市场正常/偏强，标的独立走弱并破MA20，减仓成立" if "INDEPENDENT_WEAK" in confirmations else
+              "MA20破位叠加" + "、".join({"SUPPORT_BREAK": "前低/关键支撑破坏",
+                "RELATIVE_WEAK": "显著跑输基准", "VOLUME_SELL": "放量下跌",
+                "DOWN_MOMENTUM": "下跌动量确认"}.get(item, item) for item in confirmations) + "，减仓成立")
+    return _decision("REDUCE", reason, "高" if high else "中", "额外风险证据与MA20破位持续成立",
+                     "收复关键位且相对弱势/量价风险解除", reduction_type="RISK_CONTROL",
+                     quantity=qty, amount=amount, fraction=fraction)
+
+
+def _mean_reversion_add(position, record, price, evidence, total_assets, cash, equity_exposure):
+    if not evidence.get("mean_reversion_candidate"):
+        return None
+    cfg = MARKET_FILTER_PARAMS
+    atr = _number((record.get("technical_features") or {}).get("ATR"))
+    stop = _number(record.get("invalidation_price"))
+    zone = record.get("buy_zone")
+    reduce = record.get("reduce_zone")
+    target = _number(reduce[0]) if reduce and len(reduce) == 2 else _number(record.get("target_price"))
+    forbidden = (record.get("discipline") or {}).get("forbidden_action", "")
+    budget = min(cash, total_assets * FINAL_DECISION_PARAMS["add_fraction_of_assets"])
+    unit = trade_unit(position)
+    quantity = max(0, int(budget / (price * 1.002)) // unit * unit)
+    amount = quantity * price
+    fee = max(amount * FINAL_DECISION_PARAMS["commission_rate"], FINAL_DECISION_PARAMS["min_commission"])
+    exit_amount = quantity * target if target else 0
+    exit_fee = max(exit_amount * FINAL_DECISION_PARAMS["commission_rate"], FINAL_DECISION_PARAMS["min_commission"])
+    stock = _market_name(position) != "ETF"
+    cost = (fee + exit_fee + (amount + exit_amount) * FINAL_DECISION_PARAMS["slippage_rate_per_side"] +
+            (exit_amount * FINAL_DECISION_PARAMS["stock_stamp_tax_rate"] if stock else 0) +
+            ((amount + exit_amount) * FINAL_DECISION_PARAMS["sh_transfer_fee_rate"]
+             if _market_name(position) == "A_SH" else 0))
+    weight = getattr(position, "shares", 0) * price / total_assets if total_assets > 0 else 1
+    passed = bool(total_assets > 0 and cash > 0 and quantity >= unit and atr and 0 < atr / price <= cfg["max_atr_pct"] and
+                  stop and target and stop < price < target and
+                  target - price >= cfg["min_reward_risk"] * (price - stop) and
+                  quantity * (target - price) >= 3 * cost and amount + cost <= cash and
+                  zone and zone[0] <= price <= zone[1] and equity_exposure is not None and
+                  weight + amount / total_assets <= cfg["max_position_weight"] and
+                  equity_exposure + amount / total_assets <= cfg["max_equity_exposure"] and
+                  not any(token in forbidden for token in ("越跌越补", "继续摊平", "禁止情绪化", "禁止加仓")))
+    if not passed:
+        return _decision("HOLD", "低吸形态候选成立，但ATR/现金/仓位/暴露/经济性或纪律闸门未全部通过",
+                         "低", "所有低吸风险闸门通过后复核", "失效位或支撑破坏；未成交不追价")
+    return _decision("ADD", "超跌、支撑、相对强弱与止跌收复确认，低吸风险闸门全部通过",
+                     "中", "仅在原买入区限价人工确认，未成交不追价",
+                     "跌破支撑/失效位、相对弱势恶化或离开买入区；未成交不追价",
+                     quantity=quantity, amount=amount, fraction=amount / total_assets)
+
+
+def _build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
+                         total_assets: float, cash: float, evidence: dict,
+                         ) -> dict:
     """Collapse close-only preparation layers into exactly one public action."""
     pos = view["position"]
     subtype = view.get("asset_subtype") or subtype_for(pos)
@@ -165,7 +241,6 @@ def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
     buy, reduce = advice.get("buy_range"), advice.get("reduce_range")
     stop, target = _number(advice.get("stop")), _number(advice.get("target"))
     ma_state = ma.get("ma_state", "")
-    ma_hint = ma.get("ma_action_hint", "")
     forbidden = discipline.get("forbidden_action", "") + "；" + ma.get("ma_forbidden_action", "")
     conflict = bool(advice.get("display_conflict") or ma.get("ma_conflict_flag"))
     unavailable = not view.get("available") or not price
@@ -196,25 +271,22 @@ def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
     stop_broken = bool(stop and price <= stop)
     target_reached = bool(target and price >= target)
     trend_broken = "MA20有效跌破" in ma_state
-    deep_broken = discipline.get("discipline_state") == "深套/趋势破坏"
     persistent_hot = ma_state == "persistent_overheat"
     single_burst = ma_state == "single_day_momentum_burst"
 
-    if stop_broken or (deep_broken and trend_broken):
+    if stop_broken or evidence.get("invalidation_break"):
         qty, amount, fraction = _sell_size(pos, price, 1.0)
         return _decision("RISK_EXIT", "失效位或多重趋势底线已破坏，风险控制优先",
                          confidence, "价格确认失效位/关键支撑失守", "重新站回失效位并完成结构复核",
                          reduction_type="RISK_CONTROL", quantity=qty, amount=amount, fraction=fraction)
-    if in_buy and trend_broken:
-        return _decision("NO_ACTION", "价格虽进入买入区，但MA20趋势已破坏，禁止加仓",
-                         "低", "重新站回MA20并恢复风险收益结构", "再次跌破失效位",
-                         "买入区与趋势破坏冲突")
-    if trend_broken:
-        qty, amount, fraction = _sell_size(pos, price, FINAL_DECISION_PARAMS["risk_reduce_fraction"])
-        return _decision("REDUCE", "MA20有效跌破，先降低风险而非等待做T价差",
-                         confidence, "趋势破坏维持且持仓仍可执行", "重新站回MA20并完成结构确认",
-                         reduction_type="RISK_CONTROL", quantity=qty, amount=amount,
-                         fraction=fraction)
+    mean = _mean_reversion_add(pos, {"technical_features": view.get("indicators", {}),
+        "invalidation_price": stop, "buy_zone": buy, "reduce_zone": reduce,
+        "target_price": target, "discipline": discipline}, price, evidence,
+        total_assets, cash, view.get("equity_exposure"))
+    if mean and not evidence.get("sell_confirmations"):
+        return mean
+    if trend_broken or evidence.get("trend_break_candidate"):
+        return _risk_filter_decision(pos, price, evidence)
     if (target_reached or in_reduce) and persistent_hot:
         fraction = FINAL_DECISION_PARAMS["profit_taking_fraction"]
         qty, amount, fraction = _sell_size(pos, price, fraction)
@@ -242,6 +314,7 @@ def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
                          amount=econ["sell_amount"], fraction=econ["suggested_fraction"], economics=econ)
     if advice.get("action") == "ADD_SMALL":
         blocked = any(token in forbidden for token in ("禁止加仓", "禁止追高", "越跌越补", "继续摊平"))
+        blocked = blocked or evidence.get("relative_strength_state") == "REL_WEAK" or evidence.get("volume_price_confirmation")
         if not in_buy or blocked or cash <= 0:
             return _decision("NO_ACTION", "加仓条件未同时通过买入区、纪律、现金与仓位闸门",
                              confidence, "进入买入区且趋势、纪律、现金与仓位均确认",
@@ -270,7 +343,18 @@ def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
 
 
 def build_intraday_final_decision(position, record: dict | None, quote: dict,
-                                  price_status: str, ma: dict) -> dict:
+                                  price_status: str, ma: dict, evidence: dict | None = None,
+                                  total_assets: float = 0, cash: float = 0,
+                                  equity_exposure: float | None = None) -> dict:
+    evidence = evidence or execution_evidence(position, record or {}, quote, ma)
+    decision = _build_intraday_final_decision(position, record, quote, price_status, ma,
+                                             evidence, total_assets, cash, equity_exposure)
+    return {**decision, **{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}}
+
+
+def _build_intraday_final_decision(position, record: dict | None, quote: dict,
+                                  price_status: str, ma: dict, evidence: dict,
+                                  total_assets: float, cash: float, equity_exposure: float | None) -> dict:
     """Re-evaluate the single action using fresh provisional price only."""
     if record is None:
         return _decision("MANUAL_REVIEW", "无当日10:30建议，仅能提供盘中风险快照", "低",
@@ -293,23 +377,18 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
     if not price:
         return _decision("MANUAL_REVIEW", "盘中价格不可验证", "低", "取得新鲜provisional报价",
                          "报价仍不可验证", "实时数据不足")
-    if price_status == "已失效":
+    if price_status == "已失效" or evidence.get("invalidation_break"):
         qty, amount, fraction = _sell_size(position, price, 1.0)
         decision_confidence = "高" if "MA20有效跌破" in ma.get("ma_state", "") else "中"
         return _decision("RISK_EXIT", "盘中价格已跌破早间失效位，风险控制优先",
                          decision_confidence, "失效位跌破得到新鲜报价确认", "重新站回失效位并人工复核",
                          reduction_type="RISK_CONTROL", quantity=qty, amount=amount, fraction=fraction)
     trend_broken = "MA20有效跌破" in ma.get("ma_state", "")
-    if price_status in ("已进入买入区", "接近买入区") and trend_broken:
-        return _decision("NO_ACTION", "价格进入买入区但MA20趋势破坏，盘中不加仓",
-                         "低", "重新站回MA20并恢复结构", "跌破早间失效位",
-                         "买入区与趋势破坏冲突")
-    if trend_broken:
-        fraction = FINAL_DECISION_PARAMS["risk_reduce_fraction"]
-        qty, amount, fraction = _sell_size(position, price, fraction)
-        return _decision("REDUCE", "盘中MA20趋势破坏，风险减仓不受做T经济性限制",
-                         "高", "趋势破坏保持", "重新站回MA20并确认结构修复",
-                         reduction_type="RISK_CONTROL", quantity=qty, amount=amount, fraction=fraction)
+    mean = _mean_reversion_add(position, record, price, evidence, total_assets, cash, equity_exposure)
+    if mean and not evidence.get("sell_confirmations"):
+        return mean
+    if trend_broken or evidence.get("trend_break_candidate"):
+        return _risk_filter_decision(position, price, evidence)
     triggered_reduce = price_status in ("目标已达", "已进入减仓区", "已超过减仓区")
     if triggered_reduce and ma.get("ma_state") == "persistent_overheat":
         fraction = FINAL_DECISION_PARAMS["profit_taking_fraction"]
@@ -338,6 +417,12 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
     if action not in FINAL_ACTIONS:
         action = "MANUAL_REVIEW"
     if action == "ADD" and price_status == "已进入买入区":
+        if evidence.get("relative_strength_state") == "REL_WEAK" or evidence.get("volume_price_confirmation"):
+            return _decision("HOLD", "相对弱势或持续放量杀跌，禁止加仓", "低",
+                             "量价及相对强弱重新稳定", "未成交不追价")
+        if morning.get("mean_reversion_candidate"):
+            return _decision("HOLD", "早盘低吸条件未被尾盘止跌及风险闸门重新确认，取消加仓",
+                             "低", "重新满足全部低吸条件", "未成交不追价")
         return {**morning, "manual_confirmation_required": True}
     if action == "ADD" and price_status != "已进入买入区":
         return _decision("NO_ACTION", "盘中价格未处于确定性买入区，不生成追价建议",

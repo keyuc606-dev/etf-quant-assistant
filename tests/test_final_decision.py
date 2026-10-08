@@ -56,7 +56,8 @@ def test_buy_zone_with_ma20_break_never_adds():
     decision = build_final_decision(*inputs(
         price=9.7, action="ADD_SMALL", ma_state="MA20有效跌破/趋势破坏",
         ma_hint="趋势失效，优先减仓复核"), total_assets=100000, cash=20000)
-    assert decision["final_action"] == "NO_ACTION"
+    assert decision["final_action"] == "HOLD"
+    assert decision["decision_confidence"] == "LOW"
     assert "禁止加仓" in decision["action_reason"]
 
 
@@ -121,9 +122,9 @@ def test_risk_exit_small_position_is_not_blocked_by_t_economics():
     partial = build_final_decision(*inputs(
         pos=position(shares=100, price=10), price=10, buy=(8, 9), stop=8,
         ma_state="MA20有效跌破/趋势破坏"), total_assets=10000, cash=0)
-    assert partial["final_action"] == "REDUCE"
-    assert partial["suggested_quantity"] == 100
-    assert partial["suggested_fraction"] == 1.0
+    assert partial["final_action"] == "HOLD"
+    assert partial["ma20_break_only"] is True
+    assert partial["suggested_quantity"] == 0
 
 
 @pytest.mark.parametrize("subtype", [GOLD_ETF, QDII_ETF])

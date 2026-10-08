@@ -103,7 +103,7 @@ STRATEGY_PARAMS = {
 # Final Decision Engine。这里只管理真实账户建议的确定性收敛和人工执行参考，
 # 不参与 ETF allocation/rebalance/backtest，也不会生成自动订单。
 FINAL_DECISION_PARAMS = {
-    "version": "final-decision-v1",
+    "version": "final-decision-v2",
     "stock_lot_size": 100,
     "etf_lot_size": STRATEGY_PARAMS["lot_size"],
     "add_fraction_of_assets": 0.01,
@@ -121,6 +121,38 @@ FINAL_DECISION_PARAMS = {
     "stock_stamp_tax_rate": 0.0005,
     "sh_transfer_fee_rate": 0.00001,
     "slippage_rate_per_side": 0.001,
+}
+
+# Account execution filters only; deliberately independent of ETF allocation.
+MARKET_FILTER_PARAMS = {
+    "version": "market-relative-v1",
+    "benchmarks": {"510300": "沪深300ETF", "510500": "中证500ETF",
+                   "159915": "创业板ETF", "588000": "科创50ETF"},
+    "benchmark_routes": {"510300": "510300", "510500": "510500",
+                         "159915": "159915", "588000": "588000",
+                         "159781": "159915", "159755": "159915",
+                         "159995": "159915", "516510": "159915",
+                         "159782": "159915", "159160": "159915",
+                         "159851": "510500", "561550": "510500",
+                         "512890": "510300"},
+    "selloff_return": -0.015,
+    "up_return": 0.005,
+    "strong_up_return": 0.015,
+    "relative_day_weak": -0.015,
+    "relative_5d_weak": -0.025,
+    "relative_10d_weak": -0.04,
+    "relative_day_strong": 0.01,
+    "support_atr": 0.35,
+    "support_break_atr": 0.20,
+    "reclaim_atr": 0.35,
+    "sell_volume_ratio": 1.8,
+    "sell_momentum_atr": 1.5,
+    "oversold_rsi": 35,
+    "oversold_atr": 1.0,
+    "max_atr_pct": 0.06,
+    "min_reward_risk": 1.5,
+    "max_position_weight": 0.20,
+    "max_equity_exposure": 0.35,
 }
 
 RISK_DEFAULTS = {

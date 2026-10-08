@@ -55,7 +55,7 @@ def _reports(count=1, data_quality="HIGH", news_degraded=False):
 def _quote(price=97.0, source="sina"):
     return {
         "price": price, "open": 98.0, "high": 99.0, "low": 96.0,
-        "previous_close": 100.0, "change_pct": price - 100.0,
+        "previous_close": 99.0, "change_pct": (price / 99.0 - 1) * 100,
         "volume": 10_000.0, "amount": price * 10_000,
         "as_of": "2026-09-28T10:30:00+08:00", "source": source,
         "provisional": True,

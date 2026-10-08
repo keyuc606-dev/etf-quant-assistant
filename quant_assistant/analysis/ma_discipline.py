@@ -210,7 +210,7 @@ def build_ma_discipline(view, frame, advice, discipline, cash_note=""):
         multi = bool(stop and price <= stop) or bool(buy and price < buy[0] - NEAR_ATR * atr)
         result.update(
             ma_state="MA20有效跌破/趋势破坏",
-            ma_action_hint="清仓复核" if multi else "趋势失效，优先减仓复核",
+            ma_action_hint="清仓复核" if multi else "趋势风险警报，等待额外确认",
             ma_forbidden_action="禁止加仓；禁止把单日跌破自动等同清仓",
             ma_confirmation=("多重确认：MA20有效跌破且失效位/关键支撑同步失守" if multi else
                              "连续跌破或偏离达到0.35 ATR；尚缺失效位/关键支撑多重确认"),
@@ -318,6 +318,9 @@ def intraday_ma_discipline(record, quote, price_status=""):
     if not all(value is not None and value > 0 for value in (price, ma5, ma10, ma20, atr)):
         return saved or _result(subtype)
     result = saved or _result(subtype)
+    if "MA20有效跌破" in result.get("ma_state", "") and price >= ma20:
+        result.update(ma_state="MA20收复/结构修复候选", ma_action_hint="取消单独MA20减仓，等待结构确认",
+                      ma_forbidden_action="禁止未经风险闸门追价加仓", ma_conflict_flag=False)
     previous_close = _number(quote.get("previous_close"))
     rise_atr = ((price - previous_close) / atr if previous_close else None)
     burst = rise_atr is not None and rise_atr >= BURST_ATR
@@ -327,7 +330,7 @@ def intraday_ma_discipline(record, quote, price_status=""):
     reversal = bool(quote.get("intraday_reversal") or quote.get("volume_divergence")
                     or limit_status == "broken" or reversed_from_high)
     if price < ma20 and ma20 - price >= NEAR_ATR * atr:
-        result.update(ma_state="MA20有效跌破/趋势破坏", ma_action_hint="趋势失效，优先减仓复核",
+        result.update(ma_state="MA20有效跌破/趋势破坏", ma_action_hint="趋势风险警报，等待额外确认",
                       ma_forbidden_action="禁止加仓；清仓需失效位与关键支撑多重确认",
                       ma_confirmation="盘中价低于早间MA20至少0.35 ATR",
                       ma_reason="provisional价格确认趋势风险；不改写早间区间")

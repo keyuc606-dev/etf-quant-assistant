@@ -31,6 +31,8 @@ def _record(advice_id, action="ADD", **overrides):
         "target_price": 105.0, "invalidation_price": 95.0,
         "advice_session": "10:30_EXECUTION", "generated_at": "2026-09-01T10:30:00+08:00",
         "rule_version": "routing-v2", "t_economics": None,
+        "market_filter_version": "market-relative-v1", "market_regime": "RANGE",
+        "relative_strength_state": "REL_NEUTRAL",
     }
     record.update(overrides)
     return record
