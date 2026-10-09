@@ -1,0 +1,136 @@
+name: Account Manual Catchup 2026-10-09
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: account-cloud-state
+  cancel-in-progress: false
+
+jobs:
+  catchup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Verify full regression suite before sending
+        run: python -m pytest tests/ -q
+      - name: Generate isolated closing review and send once
+        env:
+          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
+          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import contextlib, copy, datetime as dt, io, json, os, subprocess, tempfile
+          from pathlib import Path
+          import pandas as pd
+          from quant_assistant.cloud_state import CloudStateStore
+          from quant_assistant.cloud_snapshot import restore_snapshot
+          from quant_assistant.data.fetcher import CN_TZ, DataFetcher
+          from quant_assistant.portfolio.holdings import PortfolioManager
+          from quant_assistant.pipeline import run_daily_pipeline
+          from quant_assistant.portfolio.account_report import generate_account_reports
+          from quant_assistant.notifications.telegram import split_telegram_message
+          from quant_assistant.trading.service import TradingService
+          
+          now = dt.datetime.now(CN_TZ)
+          assert now.date().isoformat() == '2026-10-09' and now.hour >= 16, 'Only for 2026-10-09 after close'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', 'b1919e06c344497ff31dc8f5473f5f65614dcd44', 'HEAD'], check=True)
+          key = 'MANUAL_CATCHUP_2026-10-09'
+          store = CloudStateStore()
+          state, sha = store.load()
+          assert sha
+          assert key not in state.get('manual_catchup_records', {}), 'Already reserved/sent; do not resend blindly'
+          original = copy.deepcopy(state)
+          print('PASS cloud state parsed; fixed commit ancestor verified')
+          restore_snapshot(state['account_snapshot_b64'])
+          # Runtime projection only: never export it back to the real account snapshot.
+          with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+              pm = PortfolioManager()
+              assert pm.positions, 'Empty real portfolio'
+              result = run_daily_pipeline(pm, days=180)
+              reports = generate_account_reports(pm, stock_data=result['stock_data'], alerts=result['alerts'],
+                  fetch_errors=result['fetch_errors'], generated_at=now,
+                  executions=TradingService().repository.list_executions(),
+                  degraded_sources=getattr(result['fetcher'], 'degraded_sources', []))
+          views = {v['position'].code: v for v in reports['views']}
+          fresh = {code for code, v in views.items() if v['data_date'] == '2026-10-09'}
+          assert fresh, 'No real 2026-10-09 closing data; no report sent'
+          priority = {'RISK_EXIT': 0, 'REDUCE': 1, 'ADD': 2, 'MANUAL_REVIEW': 3, 'HOLD': 4, 'NO_ACTION': 5}
+          rows = sorted(reports['advices'], key=lambda a: (priority.get(a['final_action'], 9), a['code']))
+          lines = ['【2026-10-09 补发｜收盘复盘】',
+              '因上午系统故障，原定10:30/14:35未推送；本报告按当前可恢复数据生成，不回溯伪造早盘状态。',
+              'A股已收盘。以下全部为下一交易日参考，开盘后重新确认；不是今日可成交指令。',
+              '仅复用最新代码的纯规则收盘判断；新闻、实时市场广度及未接入数据不作推断。']
+          selected = rows[:5]
+          for i, a in enumerate(selected, 1):
+              v = views[a['code']]
+              pos = v['position']
+              eligible = a['code'] in fresh and a['data_quality'] != 'LOW' and a.get('decision_confidence') in ('HIGH', 'MEDIUM')
+              action = a['final_action_label'] if eligible else '人工复核，暂不新增交易'
+              quantity = a.get('suggested_quantity', 0) if eligible else 0
+              amount = a.get('suggested_amount', 0) if eligible else 0
+              zone = a.get('buy_range') if a['final_action'] == 'ADD' else a.get('reduce_range')
+              ref = ('–'.join(f'{float(x):.3f}' for x in zone) if zone and eligible else '不设预挂价格单，开盘后按新报价复核')
+              lines += [f'{i}. {pos.name} {pos.code}｜下一交易日参考：{action}',
+                  f'数量{quantity:,}股/份≈￥{amount:,.0f}；参考区间：{ref}',
+                  f'失效/取消：{a.get("cancel_condition", "信号失效")}；跳空或新报价不符时不沿用区间、不追价。',
+                  f'原因：{a["action_reason"] if eligible else "数据或确定性不足，不给强动作"}。行情截止：{v["data_date"] or "不可用"}收盘。']
+          lines += [f'其余{len(rows)-len(selected)}项不展开；当日收盘数据覆盖{len(fresh)}/{len(views)}项，未覆盖标的不据旧价给强动作。',
+              '保留现金、不因漏推补做交易。所有数量均为人工复核参考，须按实际可卖数量与现金重新确认。',
+              '本补发单独存档，不写10:30_EXECUTION，不纳入正式建议效果统计；不自动下单。']
+          text = '\n'.join(lines)
+          parts = split_telegram_message(text)
+          record = {'manual_catchup': True, 'id': key, 'report_type': 'AFTER_CLOSE_REVIEW',
+              'generated_at': now.isoformat(), 'code_commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'], 'status': 'sending',
+              'text': text, 'fresh_close_count': len(fresh), 'message_ids': []}
+          # Reload before reserving to detect any concurrent account/history change.
+          current, sha = store.load()
+          assert current == original, 'State changed during generation; abort before send'
+          state.setdefault('manual_catchup_records', {})[key] = record
+          store.save(state, sha, 'Reserve isolated manual catch-up 2026-10-09')
+          check, sha = store.load()
+          assert check['manual_catchup_records'][key] == record
+          for field in original:
+              if field not in ('updated_at', 'manual_catchup_records'):
+                  assert check[field] == original[field], 'Non-catchup state changed'
+          print('PASS isolated reservation persisted; account snapshot, Telegram cursor and formal advice unchanged')
+          fetcher = DataFetcher()
+          for part in parts:
+              response = fetcher.send_telegram_message(os.environ['TELEGRAM_BOT_TOKEN'], os.environ['TELEGRAM_CHAT_ID'], part)
+              assert response.get('ok') and response.get('message_id') is not None
+              record['message_ids'].append(response['message_id'])
+          record['status'] = 'sent'
+          record['sent_at'] = dt.datetime.now(CN_TZ).isoformat()
+          check['manual_catchup_records'][key] = record
+          store.save(check, sha, 'Confirm Telegram manual catch-up 2026-10-09 sent')
+          verified, _ = store.load()
+          assert verified['manual_catchup_records'][key] == record
+          for field in original:
+              if field not in ('updated_at', 'manual_catchup_records'):
+                  assert verified[field] == original[field], 'Non-catchup state changed'
+          print(f'PASS Telegram API ok; parts={len(parts)}; independent manual record=sent; formal history and account unchanged')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as handle:
+              handle.write('### Manual catch-up 2026-10-09\n\nPASS: Telegram API ok; independent record sent; formal advice, holdings, cash and bot cursor unchanged.\n')
+          
+          PY
+      - name: Remove private runtime projections
+        if: always()
+        run: |
+          rm -f data/portfolio.json data/portfolio.json.bak data/portfolio.json.tmp
+          rm -f data/trading.sqlite3 data/trading.sqlite3-shm data/trading.sqlite3-wal
+          rm -f data/reports/my-portfolio-*.md data/reports/my-portfolio-telegram.txt
