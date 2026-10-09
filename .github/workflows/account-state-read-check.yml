@@ -1,0 +1,40 @@
+name: Account State Read Check
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Verify cloud, Telegram and execution regressions
+        run: python -m pytest tests/test_github_large_state.py tests/test_telegram_trade_feedback.py tests/test_market_filter.py tests/test_execution_plans.py tests/test_v3_advice_intraday.py tests/test_monthly_review.py -q
+      - name: Read and hydrate latest state in disposable directory
+        env:
+          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
+          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from quant_assistant.cloud_state import CloudStateStore
+          from quant_assistant.cloud_snapshot import restore_snapshot
+          store = CloudStateStore()
+          state, sha = store.load()
+          assert sha
+          with tempfile.TemporaryDirectory() as temporary:
+              root = Path(temporary)
+              restore_snapshot(state["account_snapshot_b64"], root / "test.sqlite3", root / "portfolio.json")
+          print("PASS: latest private state parsed and hydrated; no state writes or bot polling")
+          PY

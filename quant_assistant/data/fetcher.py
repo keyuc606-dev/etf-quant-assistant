@@ -872,9 +872,14 @@ class DataFetcher:
 
     @staticmethod
     def _github_contents_request(token: str, repository: str, path: str,
-                                 payload: Optional[dict] = None) -> Optional[dict]:
+                                 payload: Optional[dict] = None,
+                                 *, blob_sha: Optional[str] = None) -> Optional[dict]:
         safe_path = urllib.parse.quote(path.strip("/"), safe="/")
         url = f"https://api.github.com/repos/{repository}/contents/{safe_path}"
+        if blob_sha is not None:
+            if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
+                raise RuntimeError("GitHub 状态文件 SHA 无效")
+            url = f"https://api.github.com/repos/{repository}/git/blobs/{blob_sha}"
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             url,
@@ -912,8 +917,20 @@ class DataFetcher:
         if result is None:
             return None
         try:
-            content = base64.b64decode(result["content"], validate=False)
-            return {"content": content, "sha": str(result["sha"])}
+            sha = str(result["sha"])
+            if result.get("encoding") == "none":
+                # Contents omits inline data above 1 MiB. Fetch this exact blob,
+                # keeping bytes and optimistic-write SHA from the same revision.
+                result = self._github_contents_request(
+                    token, repository, path, blob_sha=sha
+                )
+                if result is None or result.get("sha") != sha:
+                    raise ValueError("GitHub 状态 blob 与文件 SHA 不一致")
+            if result.get("encoding") != "base64":
+                raise ValueError("GitHub 状态文件编码无效")
+            encoded = "".join(result["content"].split())
+            content = base64.b64decode(encoded, validate=True)
+            return {"content": content, "sha": sha}
         except (KeyError, TypeError, ValueError, binascii.Error) as error:
             raise RuntimeError("GitHub 状态文件格式无效") from error
 
