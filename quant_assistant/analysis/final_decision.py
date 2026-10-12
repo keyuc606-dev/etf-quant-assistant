@@ -11,6 +11,8 @@ from ..config import FINAL_DECISION_PARAMS, MARKET_FILTER_PARAMS
 from .market_filter import execution_evidence, DIAGNOSTIC_FIELDS
 
 
+from .fundamental import evaluate, annotate
+
 VERSION = FINAL_DECISION_PARAMS["version"]
 FINAL_ACTIONS = ("HOLD", "ADD", "REDUCE", "RISK_EXIT", "NO_ACTION", "MANUAL_REVIEW")
 FINAL_ACTION_PRIORITY = ("RISK_EXIT", "REDUCE", "MANUAL_REVIEW", "ADD", "HOLD", "NO_ACTION")
@@ -162,12 +164,20 @@ def build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
         view["position"], {"technical_features": view.get("indicators", {}),
                           "invalidation_price": advice.get("stop")},
         {"price": view["position"].current_price}, ma)
+    facts = evaluate(view["position"], view.get("fundamental_observations"), view.get("fundamental_date"))
+    evidence = {**evidence, **facts}
     decision = _build_final_decision(view, advice, discipline, ma, total_assets, cash, evidence)
-    return {**decision, **{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}}
+    decision = annotate(decision, facts, evidence)
+    return {**{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}, **decision}
 
 
 def _risk_filter_decision(position, price, evidence):
     confirmations = evidence.get("sell_confirmations") or []
+    if (evidence.get("valuation_state") == "CHEAP" and
+            evidence.get("fundamental_state") in ("STABLE", "IMPROVING") and
+            not evidence.get("support_break")):
+        return _decision("HOLD", "估值偏低+基本面代理稳定，但趋势尚未收复，低吸观察；不因MA20/相对弱势直接减仓",
+                         "中", "等待支撑、相对强弱和技术收复确认", "失效位或关键支撑破坏")
     if not confirmations:
         broad = evidence.get("market_regime") == "BROAD_SELLOFF"
         reason = ("大盘普跌，标的相对抗跌，MA20单独破位不足以减仓" if broad and
@@ -175,7 +185,8 @@ def _risk_filter_decision(position, price, evidence):
                   "MA20单独破位仅为风险警报，额外确认不足，持有等待修复；禁止加仓")
         return _decision("HOLD", reason, "低", "等待支撑、相对强弱与量价确认",
                          "失效位或关键支撑破坏则重新评估")
-    high = (("RELATIVE_WEAK" in confirmations and "SUPPORT_BREAK" in confirmations) or
+    adverse = evidence.get("fundamental_state") == "DETERIORATING" and evidence.get("valuation_state") in ("EXPENSIVE", "EXTREME")
+    high = adverse or (("RELATIVE_WEAK" in confirmations and "SUPPORT_BREAK" in confirmations) or
             "INDEPENDENT_WEAK" in confirmations or len(confirmations) >= 3)
     # A degraded style benchmark cannot justify HIGH relative-weak confidence alone.
     if evidence.get("benchmark_degraded") and "SUPPORT_BREAK" not in confirmations:
@@ -185,6 +196,8 @@ def _risk_filter_decision(position, price, evidence):
               "MA20破位叠加" + "、".join({"SUPPORT_BREAK": "前低/关键支撑破坏",
                 "RELATIVE_WEAK": "显著跑输基准", "VOLUME_SELL": "放量下跌",
                 "DOWN_MOMENTUM": "下跌动量确认"}.get(item, item) for item in confirmations) + "，减仓成立")
+    if adverse:
+        reason = "估值偏高+基本面代理恶化+技术走弱，风险收缩；" + reason
     return _decision("REDUCE", reason, "高" if high else "中", "额外风险证据与MA20破位持续成立",
                      "收复关键位且相对弱势/量价风险解除", reduction_type="RISK_CONTROL",
                      quantity=qty, amount=amount, fraction=fraction)
@@ -193,6 +206,11 @@ def _risk_filter_decision(position, price, evidence):
 def _mean_reversion_add(position, record, price, evidence, total_assets, cash, equity_exposure):
     if not evidence.get("mean_reversion_candidate"):
         return None
+    if evidence.get("fundamental_version") and not (
+            evidence.get("valuation_state") in ("CHEAP", "FAIR") and
+            evidence.get("fundamental_state") in ("STABLE", "IMPROVING")):
+        return _decision("HOLD", "低吸技术候选存在，但基本面/估值闸门未通过（恶化、昂贵或UNKNOWN）",
+                         "低", "可靠估值合理且基本面稳定/改善后重新确认", "未成交不追价；失效位破坏退出")
     cfg = MARKET_FILTER_PARAMS
     atr = _number((record.get("technical_features") or {}).get("ATR"))
     stop = _number(record.get("invalidation_price"))
@@ -224,7 +242,7 @@ def _mean_reversion_add(position, record, price, evidence, total_assets, cash, e
     if not passed:
         return _decision("HOLD", "低吸形态候选成立，但ATR/现金/仓位/暴露/经济性或纪律闸门未全部通过",
                          "低", "所有低吸风险闸门通过后复核", "失效位或支撑破坏；未成交不追价")
-    return _decision("ADD", "超跌、支撑、相对强弱与止跌收复确认，低吸风险闸门全部通过",
+    return _decision("ADD", "估值合理+基本面代理稳定/改善+超跌支撑与技术收复，低吸风险闸门全部通过",
                      "中", "仅在原买入区限价人工确认，未成交不追价",
                      "跌破支撑/失效位、相对弱势恶化或离开买入区；未成交不追价",
                      quantity=quantity, amount=amount, fraction=amount / total_assets)
@@ -312,6 +330,8 @@ def _build_final_decision(view: dict, advice: dict, discipline: dict, ma: dict,
                          confidence, "减仓区触发且经济性门槛满足", "回补价差或净收益低于门槛",
                          reduction_type="TACTICAL_T", quantity=econ["suggested_quantity"],
                          amount=econ["sell_amount"], fraction=econ["suggested_fraction"], economics=econ)
+    if advice.get("action") == "ADD_SMALL" and (evidence.get("fundamental_state") == "DETERIORATING" or evidence.get("valuation_state") in ("EXPENSIVE", "EXTREME")):
+        return _decision("HOLD", "估值偏高或基本面代理恶化，禁止追高加仓", "中", "基本面/估值恢复后复核", "未成交不追价")
     if advice.get("action") == "ADD_SMALL":
         blocked = any(token in forbidden for token in ("禁止加仓", "禁止追高", "越跌越补", "继续摊平"))
         blocked = blocked or evidence.get("relative_strength_state") == "REL_WEAK" or evidence.get("volume_price_confirmation")
@@ -347,9 +367,13 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
                                   total_assets: float = 0, cash: float = 0,
                                   equity_exposure: float | None = None) -> dict:
     evidence = evidence or execution_evidence(position, record or {}, quote, ma)
+    facts = evaluate(position, (record or {}).get("fundamental_observations"),
+                     (record or {}).get("fundamental_date"))
+    evidence = {**evidence, **facts}
     decision = _build_intraday_final_decision(position, record, quote, price_status, ma,
                                              evidence, total_assets, cash, equity_exposure)
-    return {**decision, **{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}}
+    decision = annotate(decision, facts, evidence)
+    return {**{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}, **decision}
 
 
 def _build_intraday_final_decision(position, record: dict | None, quote: dict,
@@ -416,6 +440,8 @@ def _build_intraday_final_decision(position, record: dict | None, quote: dict,
     action = morning.get("final_action", "NO_ACTION")
     if action not in FINAL_ACTIONS:
         action = "MANUAL_REVIEW"
+    if action == "ADD" and (evidence.get("fundamental_state") == "DETERIORATING" or evidence.get("valuation_state") in ("EXPENSIVE", "EXTREME")):
+        return _decision("HOLD", "估值偏高或基本面代理恶化，禁止追高加仓", "中", "基本面/估值恢复后复核", "未成交不追价")
     if action == "ADD" and price_status == "已进入买入区":
         if evidence.get("relative_strength_state") == "REL_WEAK" or evidence.get("volume_price_confirmation"):
             return _decision("HOLD", "相对弱势或持续放量杀跌，禁止加仓", "低",

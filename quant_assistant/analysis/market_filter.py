@@ -11,6 +11,8 @@ from ..asset_routing import STOCK, EQUITY_ETF, subtype_for
 from ..config import MARKET_FILTER_PARAMS as CFG
 from ..trading_calendar import annual_trade_dates
 
+from .fundamental import FIELDS as FUNDAMENTAL_FIELDS
+
 VERSION = CFG["version"]
 DIAGNOSTIC_FIELDS = (
     "market_filter_version", "market_regime", "market_breadth", "systematic_selloff",
@@ -19,7 +21,7 @@ DIAGNOSTIC_FIELDS = (
     "trend_break_candidate", "ma20_break_only", "support_hold", "support_break",
     "invalidation_break", "mean_reversion_candidate", "reclaim_confirmed",
     "volume_price_confirmation", "sell_confirmations", "filter_applicability",
-)
+) + FUNDAMENTAL_FIELDS
 
 
 def number(value):

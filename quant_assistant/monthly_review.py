@@ -234,6 +234,7 @@ def build_monthly_review(records: list[dict], executions: list[dict],
                       ("market_filter_version", "market_regime", "relative_strength_state"))
         row["filter_record_quality"] = ("complete" if present else "partial" if any(
             record.get(key) is not None for key in DIAGNOSTIC_FIELDS) else "legacy")
+        row["fundamental_record_quality"] = ("complete" if record.get("fundamental_version") and record.get("fundamental_state") and record.get("valuation_state") else "partial" if any(record.get(k) is not None for k in ("fundamental_state", "valuation_state")) else "legacy")
         row["final_decision_version"] = record.get("final_decision_version") or "legacy/unknown"
         row["final_action"] = action
         for horizon in WINDOWS:
@@ -273,6 +274,9 @@ def build_monthly_review(records: list[dict], executions: list[dict],
         "by_rule_version": _group(rows, "rule_version"),
         "by_market_regime": _group(rows, "market_regime"),
         "by_relative_strength": _group(rows, "relative_strength_state"),
+        "by_fundamental_state": _group(rows, "fundamental_state"),
+        "by_valuation_state": _group(rows, "valuation_state"),
+        "by_low_buy_state": _group(rows, "low_buy_state"),
         "by_ma20_break_only": _group(rows, "ma20_break_only"),
         "by_final_decision_version": _group(rows, "final_decision_version"),
         "comparison": {
@@ -361,7 +365,10 @@ def render_markdown(report: dict) -> str:
                        ("rule_version", "by_rule_version"),
                        ("market_regime", "by_market_regime"),
                        ("relative_strength_state", "by_relative_strength"),
-                       ("ma20_break_only", "by_ma20_break_only")):
+                       ("ma20_break_only", "by_ma20_break_only"),
+                       ("fundamental_state", "by_fundamental_state"),
+                       ("valuation_state", "by_valuation_state"),
+                       ("low_buy_state", "by_low_buy_state")):
         lines.append(f"### {title}")
         lines.append("")
         for name, item in report[key].items():

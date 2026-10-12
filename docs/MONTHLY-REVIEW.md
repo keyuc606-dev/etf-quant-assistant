@@ -22,7 +22,7 @@ CSV 每条 advice record 一行，保留动作、规则版本、数据质量、�
 - `partial_backfill`：字段不完整，但日期、代码、建议身份和参考价格足以重算部分结果；
 - `legacy_record`：关键原始事实缺失，只保留能确认的字段，其余为空。
 
-没有保存的盘中上下文、没有录入的成交、缺失的 10:30/14:35 行情不会补造。只有 `related_plan_id=advice_id` 的成交进入实际执行层。
+没有保存的盘中上下文、没有录入的成交、缺失的 10:30/14:10 行情不会补造。只有 `related_plan_id=advice_id` 的成交进入实际执行层。
 
 ## 2026-09 虚构示例
 
@@ -52,3 +52,5 @@ CSV 每条 advice record 一行，保留动作、规则版本、数据质量、�
 通知门禁依次使用：本地 `data/cache/trade_calendar.csv` 审计缓存、随代码维护的上交所完整年度休市表、数据获取层刷新。缓存与内置范围都无法确定时返回 `unknown`，与休市相同地安全跳过。2026 年中秋节 9 月 25–27 日、国庆节 10 月 1–7 日休市；9 月 28 日、10 月 8 日恢复开市；9 月 20 日和 10 月 10 日虽为调休工作日但仍是周末休市。
 
 当前没有自动发送月报附件：报告可能包含真实账户成交和成本，默认只保存在私有运行目录。需要自动化时，应由每日收盘后的私有状态 workflow 调用，并用“当月最后一个 A 股交易日”门禁决定是否生成。
+
+基本面/估值字段与legacy兼容：见 [FUNDAMENTAL-VALUATION-v1](FUNDAMENTAL-VALUATION-v1.md)。CSV新增fundamental_state、valuation_state、fundamental_score、valuation_score、valuation_percentile、fundamental_mapping_degraded、low_buy_state、tech_vs_fundamental_conflict与final_action；旧值不补造。

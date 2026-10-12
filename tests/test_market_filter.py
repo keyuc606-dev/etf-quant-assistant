@@ -98,12 +98,13 @@ def test_invalidation_always_exits_even_with_forced_mean_reversion_candidate():
     assert result["suggested_quantity"] == 1000
 
 
-def test_strict_reclaimed_oversold_candidate_can_add_under_ma20():
+def test_reclaimed_oversold_without_fundamentals_waits_under_ma20():
     values = scenario(low=95, high=97.1)
     assert values[-1]["mean_reversion_candidate"] is True
     result = decide(values, total_assets=1000000, cash=500000, equity_exposure=.1)
-    assert result["final_action"] == "ADD"
-    assert result["decision_confidence"] == "MEDIUM"
+    assert result["final_action"] == "HOLD"
+    assert result["fundamental_state"] == "UNKNOWN"
+    assert result["decision_confidence"] == "LOW"
     assert "未成交不追价" in result["cancel_condition"]
     assert result["suggested_quantity"] % 100 == 0
 
@@ -218,7 +219,7 @@ def test_reports_hide_ma20_only_and_cap_confirmed_reductions_at_five():
     saved = make_records(report, NOW, "test", "10:30_EXECUTION")
     assert saved[0]["market_regime"] == "BROAD_SELLOFF"
     assert saved[0]["final_decision"]["relative_strength_state"] == "REL_WEAK"
-    later = NOW.replace(hour=14, minute=35)
+    later = NOW.replace(hour=14, minute=10)
     pm = SimpleNamespace(positions=[v["position"] for v in report["views"]], cash=1000000)
     text = build_closing_execution(pm, saved, fetcher, later)
     assert text.count("结论：减仓") == 5

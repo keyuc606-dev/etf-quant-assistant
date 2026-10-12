@@ -208,6 +208,13 @@ def _render_order_range(value) -> str:
     return f"{_price_text(value[0])}–{_price_text(value[1])}"
 
 
+def _fundamental_data(fetcher, position, now):
+    try:
+        return fetcher.fetch_fundamental(position, now) or {}
+    except Exception:
+        return {}
+
+
 def _execution_market(fetcher, now):
     """Reuse existing free ETF providers; missing/stale proxies fail closed."""
     quotes, frames = {}, {}
@@ -273,6 +280,8 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
                                  record.get("asset_subtype"))
         ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
         ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
+        record = {**record, "fundamental_observations": _fundamental_data(fetcher, pos, now),
+                  "fundamental_date": now.astimezone(CN_TZ).date()}
         evidence = execution_evidence(pos, record, ma_quote, ma, environment,
                                       benchmark_frames, benchmark_quotes, now.astimezone(CN_TZ))
         decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma,
@@ -299,10 +308,12 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
         if detail is not None:
             detail.append(
                 f"### {pos.name} {pos.code}\n{quote.get('as_of', '时间未标注')} "
-                f"{quote.get('source', '未知源')} provisional；状态 {verdict['status']}；"
+                f"{quote.get('source', '未知源')} provisional；价格位置 {verdict['status']}；"
                 f"数据 {data_quality}；决策 {decision['decision_confidence']}；"
                 f"均线 {compact_ma_note(ma)}；市场 {decision.get('market_regime')}；"
-                f"相对强弱 {decision.get('relative_strength_state')}；原因 {decision['action_reason']}。"
+                f"相对强弱 {decision.get('relative_strength_state')}；"
+                f"基本面 {decision.get('fundamental_state')}；估值 {decision.get('valuation_state')}；"
+                f"低吸状态 {decision.get('low_buy_state')}；最终动作 {decision['final_action']}；原因 {decision['action_reason']}。"
             )
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:5]
@@ -328,11 +339,12 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
         if decision.get("t_economics"):
             lines.append(f"做T经济性：{economics_text(decision['t_economics'])}")
         if decision["final_action"] in ("ADD", "REDUCE"):
-            lines.append("未成交：不追价，14:35复核。")
+            lines.append("未成交：不追价，14:10复核。")
     hidden = len(reports["views"]) - len(selected)
     lines.append(f"其余{hidden}只：无明确早盘动作。")
     if degraded:
         lines.append(f"其中{len(degraded)}只因数据质量低已折叠，不给强执行动作。")
+    lines.append("14:10后如未成交不追价，按条件单人工执行；当前为临时行情，不代表最终收盘价。")
     lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
     lines.append(f"市场环境：{environment['market_regime']}；市场宽度缺失时仅使用指数代理。")
     return "\n".join(lines)
@@ -583,16 +595,23 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
         if not quote or not quote.get("provisional"):
             degraded.append(pos.code)
             continue
-        fresh_count += 1
         if record is None:
             if detail is not None:
                 detail.append(f"### {pos.name} {pos.code}\n无10:30执行建议基准；仅保留风险快照。")
             continue
         data_quality = _execution_data_quality(record.get("data_quality", "LOW"), quote, now)
+        if data_quality == "LOW":
+            degraded.append(pos.code)
+            if detail is not None:
+                detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of')}；行情过旧或质量不足，MANUAL_REVIEW；不生成强动作。")
+            continue
+        fresh_count += 1
         verdict = classify_quote(record, quote, record.get("reference_volume"),
                                  record.get("asset_subtype"))
         ma_quote = {**quote, "session_progress": _market_progress(quote.get("as_of"))}
         ma = intraday_ma_discipline(record, ma_quote, verdict["status"])
+        record = {**record, "fundamental_observations": _fundamental_data(fetcher, pos, now),
+                  "fundamental_date": now.astimezone(CN_TZ).date()}
         evidence = execution_evidence(pos, record, ma_quote, ma, environment,
                                       benchmark_frames, benchmark_quotes, now.astimezone(CN_TZ))
         decision = build_intraday_final_decision(pos, record, quote, verdict["status"], ma,
@@ -628,18 +647,20 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
             candidates.append((priority, pos.code, pos, record, decision, change, verdict, ma))
         if detail is not None:
             detail.append(
-                f"### {pos.name} {pos.code}\n状态 {verdict['status']}；早盘 {original}；"
+                f"### {pos.name} {pos.code}\n报价 {quote.get('as_of')} provisional；价格位置 {verdict['status']}；早盘 {original}；"
                 f"尾盘 {current}；变更 {change}；数据 {data_quality}；"
                 f"决策 {decision['decision_confidence']}；均线 {compact_ma_note(ma)}；"
                 f"市场 {decision.get('market_regime')}；基准 {decision.get('benchmark_code')}；"
-                f"相对强弱 {decision.get('relative_strength_state')}；原因 {decision['action_reason']}。"
+                f"相对强弱 {decision.get('relative_strength_state')}；"
+                f"基本面 {decision.get('fundamental_state')}；估值 {decision.get('valuation_state')}；"
+                f"低吸状态 {decision.get('low_buy_state')}；最终动作 {decision['final_action']}；原因 {decision['action_reason']}。"
             )
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:5]
     if quality is not None:
         quality.update({"morning_advice": bool(morning), "fresh_provisional": fresh_count > 0,
                         "degraded": bool(degraded), "action_count": len(selected)})
-    lines = [f"【14:35 尾盘执行策略】｜{day}",
+    lines = [f"【14:10 尾盘提前执行计划】｜{day}",
              "仅复核10:30计划的继续、取消或修正；盘中数据为 provisional，不自动下单。"]
     if not morning:
         lines.append("今日无10:30执行建议基准：本次仅为风险快照，不伪造早盘计划。")
@@ -666,6 +687,7 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
     lines.append(f"其余{hidden}只：无明确尾盘动作，维持原计划/不操作。")
     if degraded:
         lines.append(f"其中{len(degraded)}只实时数据不可用，已折叠且未用昨收冒充。")
+    lines.append("14:10后如未成交不追价，按条件单人工执行；当前为临时行情，不代表最终收盘价。")
     lines.append("所有建议均需人工确认；系统不会连接券商或代为下单。")
     lines.append(f"市场环境：{environment['market_regime']}；详细相对强弱见附件。")
     return "\n".join(lines)
@@ -719,7 +741,7 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     path = REPORT_DIR / "my-portfolio-intraday.md"
     path.write_text(text + "\n", encoding="utf-8")
     detail_path = REPORT_DIR / "my-portfolio-intraday-detail.md"
-    detail_path.write_text("# 14:35尾盘详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
+    detail_path.write_text("# 14:10尾盘详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")

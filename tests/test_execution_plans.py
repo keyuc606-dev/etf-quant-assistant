@@ -68,7 +68,7 @@ def test_morning_is_capped_at_five_and_uses_no_chase_language():
     fetcher.fetch_intraday_quote.return_value = _quote()
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
-    assert text.count("未成交：不追价，14:35复核。") == 5
+    assert text.count("未成交：不追价，14:10复核。") == 5
     assert "其余1只：无明确早盘动作" in text
     assert "【10:30 早盘执行策略】" in text
 
@@ -115,11 +115,11 @@ def test_closing_cancels_unfilled_plan_and_never_assumes_fill():
     records = make_records(reports, now, "test", EXECUTION_SESSION)
     closing_fetcher = Mock()
     closing_fetcher.fetch_intraday_quote.return_value = {
-        **_quote(103.0), "as_of": "2026-09-28T14:35:00+08:00",
+        **_quote(103.0), "as_of": "2026-09-28T14:10:00+08:00",
     }
     text = build_closing_execution(
         pm, records, closing_fetcher,
-        dt.datetime(2026, 9, 28, 14, 35, tzinfo=CN_TZ),
+        dt.datetime(2026, 9, 28, 14, 10, tzinfo=CN_TZ),
     )
     assert "取消原挂单/不再追价" in text
     assert "若早盘订单未成交：取消原挂单，不再追价" in text
@@ -134,7 +134,7 @@ def test_closing_without_1030_record_is_only_risk_snapshot():
     fetcher.fetch_intraday_quote.return_value = _quote(89.0)
     text = build_closing_execution(
         pm, old_records, fetcher,
-        dt.datetime(2026, 9, 28, 14, 35, tzinfo=CN_TZ),
+        dt.datetime(2026, 9, 28, 14, 10, tzinfo=CN_TZ),
     )
     assert "仅为风险快照，不伪造早盘计划" in text
     assert "结论：风险退出" not in text
@@ -152,12 +152,12 @@ def test_new_history_fields_coexist_with_legacy_records():
     assert current[0]["decision_confidence"] == "MEDIUM"
 
 
-def test_workflow_has_only_1030_and_1435_user_schedules():
+def test_workflow_has_only_1030_and_1410_user_schedules():
     workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
     morning = (workflows / "account-daily-telegram.yml").read_text()
     closing = (workflows / "account-intraday-telegram.yml").read_text()
     assert 'cron: "30 2 * * 1-5"' in morning
-    assert 'cron: "35 6 * * 1-5"' in closing
+    assert 'cron: "10 6 * * 1-5"' in closing
     assert 'cron: "20 1 * * 1-5"' not in morning
     assert "notify-morning-execution" in morning
     assert "group: account-cloud-state" in morning and "group: account-cloud-state" in closing

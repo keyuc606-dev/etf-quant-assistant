@@ -3,8 +3,8 @@ name: Account Closing Execution Telegram
 "on":
   workflow_dispatch:
   schedule:
-    # 06:35 UTC = 14:35 Asia/Shanghai; weekdays only.
-    - cron: "35 6 * * 1-5"
+    # 06:10 UTC = 14:10 Asia/Shanghai; weekdays only.
+    - cron: "10 6 * * 1-5"
 
 permissions:
   contents: read

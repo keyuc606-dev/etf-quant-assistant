@@ -156,6 +156,70 @@ class DataFetcher:
 
     # ---------- 历史行情缓存 ----------
 
+    def fetch_fundamental(self, position, now):
+        """Free public data, bounded request, dated disk cache and failure cooldown."""
+        from ..analysis.fundamental import INDEX_ROUTES
+        from ..asset_routing import subtype_for, STOCK, EQUITY_ETF
+        subtype = subtype_for(position)
+        index = INDEX_ROUTES.get(position.code)
+        if subtype not in (STOCK, EQUITY_ETF) or (subtype == EQUITY_ETF and not index):
+            return {}
+        day = now.astimezone(CN_TZ).date()
+        path = self.cache_dir / f"fundamental_{index or position.code}.json"
+        cached = {}
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if cached.get("attempt_day") == day.isoformat():
+                return cached.get("data") or {}
+        except (OSError, ValueError):
+            pass
+        data = cached.get("data") or {}
+        try:
+            if subtype == EQUITY_ETF:
+                params = urllib.parse.urlencode({"indexCode": index,
+                    "startDate": (day - datetime.timedelta(days=1200)).strftime("%Y%m%d"),
+                    "endDate": day.strftime("%Y%m%d")})
+                url = "https://www.csindex.com.cn/csindex-home/perf/index-perf?" + params
+            else:
+                symbol = position.code + (".SH" if position.code.startswith("6") else ".SZ")
+                params = urllib.parse.urlencode({"type": "RPT_F10_FINANCE_MAINFINADATA",
+                    "sty": "APP_F10_MAINFINADATA", "filter": f'(SECUCODE="{symbol}")',
+                    "p": 1, "ps": 8, "sr": -1, "st": "REPORT_DATE", "source": "HSF10", "client": "PC"})
+                url = "https://datacenter.eastmoney.com/securities/api/data/get?" + params
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _no_proxy(), urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read())
+            if subtype == EQUITY_ETF:
+                rows = []
+                for row in payload.get("data") or []:
+                    stamp = datetime.datetime.strptime(str(row["tradeDate"]), "%Y%m%d").date()
+                    if str(row.get("indexCode")) == index and stamp < day:
+                        rows.append({"date": stamp.isoformat(), "pe": row.get("peg"),
+                                     "close": row.get("close"), "constituents": row.get("consNumber")})
+                if not rows:
+                    raise ValueError("empty/mismatched index")
+                data = {"index_code": index, "as_of": max(r["date"] for r in rows),
+                        "history": rows, "source": "CSI index-perf rolling PE/close"}
+            else:
+                rows = (payload.get("result") or {}).get("data") or []
+                eligible = [r for r in rows if str(r.get("NOTICE_DATE", ""))[:10] < day.isoformat()]
+                if not eligible:
+                    raise ValueError("no published financial report")
+                row = max(eligible, key=lambda r: r.get("REPORT_DATE", ""))
+                data = {"as_of": str(row["REPORT_DATE"])[:10], "source": "Eastmoney published financials",
+                        "profit_yoy": row.get("PARENTNETPROFITTZ"), "roe": row.get("ROEJQ")}
+        except Exception:
+            # Old snapshots are returned with their original as_of; evaluator
+            # rejects stale data. Never stamp an old observation with today.
+            pass
+        try:
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"attempt_day": day.isoformat(), "data": data}), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return data
+
     def _cache_path(self, code: str, period: str) -> Path:
         return self.cache_dir / f"{code}_{period}.csv"
 

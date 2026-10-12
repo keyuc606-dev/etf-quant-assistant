@@ -103,7 +103,7 @@ STRATEGY_PARAMS = {
 # Final Decision Engine。这里只管理真实账户建议的确定性收敛和人工执行参考，
 # 不参与 ETF allocation/rebalance/backtest，也不会生成自动订单。
 FINAL_DECISION_PARAMS = {
-    "version": "final-decision-v2",
+    "version": "final-decision-v3-fundamental",
     "stock_lot_size": 100,
     "etf_lot_size": STRATEGY_PARAMS["lot_size"],
     "add_fraction_of_assets": 0.01,

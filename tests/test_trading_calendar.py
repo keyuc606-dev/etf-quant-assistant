@@ -46,8 +46,8 @@ def test_notification_gate_logs_closed_and_unknown_without_notifying(capsys):
     now = dt.datetime(2026, 9, 25, 10, 30, tzinfo=CN_TZ)
     assert not _notification_trading_day_gate("10:30", now, closed)
     assert "休市，静默跳过 10:30 推送" in capsys.readouterr().out
-    assert not _notification_trading_day_gate("14:35", now, unknown)
-    assert "交易日状态未知，静默跳过 14:35 推送" in capsys.readouterr().out
+    assert not _notification_trading_day_gate("14:10", now, unknown)
+    assert "交易日状态未知，静默跳过 14:10 推送" in capsys.readouterr().out
 
 
 def test_closed_day_commands_exit_before_reports_state_or_telegram(monkeypatch):
