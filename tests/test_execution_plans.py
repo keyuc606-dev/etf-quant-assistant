@@ -62,15 +62,15 @@ def _quote(price=97.0, source="sina"):
     }
 
 
-def test_morning_is_capped_at_five_and_uses_no_chase_language():
+def test_morning_is_capped_at_three_and_uses_no_chase_language():
     reports, _pm = _reports(6)
     fetcher = Mock()
     fetcher.fetch_intraday_quote.return_value = _quote()
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
-    assert text.count("未成交：不追价，14:10复核。") == 5
-    assert "其余1只：无明确早盘动作" in text
-    assert "【10:30 早盘执行策略】" in text
+    assert text.count("未成交不追价，14:10复核") == 3
+    assert "其余3只：另有3项候选见详细报告" in text
+    assert "【10:30 早盘策略】" in text
 
 
 def test_low_data_quality_blocks_strong_action():
@@ -80,7 +80,7 @@ def test_low_data_quality_blocks_strong_action():
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
     assert "1. 测试" not in text
-    assert "数据质量低已折叠，不给强执行动作" in text
+    assert "数据降级：1只行情不足，暂不执行" in text
 
 
 def test_morning_rejects_stale_provisional_timestamp():
@@ -92,7 +92,7 @@ def test_morning_rejects_stale_provisional_timestamp():
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
     assert "1. 测试" not in text
-    assert "数据质量低已折叠" in text
+    assert "数据降级" in text
 
 
 def test_partial_context_does_not_lower_explicit_risk_exit_confidence():
@@ -103,7 +103,8 @@ def test_partial_context_does_not_lower_explicit_risk_exit_confidence():
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
     assert "结论：风险退出" in text
-    assert "决策高｜数据中" in text
+    assert reports["advices"][0]["decision_confidence"] == "HIGH"
+    assert reports["advices"][0]["data_quality"] == "MEDIUM"
 
 
 def test_closing_cancels_unfilled_plan_and_never_assumes_fill():
@@ -121,9 +122,9 @@ def test_closing_cancels_unfilled_plan_and_never_assumes_fill():
         pm, records, closing_fetcher,
         dt.datetime(2026, 9, 28, 14, 10, tzinfo=CN_TZ),
     )
-    assert "取消原挂单/不再追价" in text
-    assert "若早盘订单未成交：取消原挂单，不再追价" in text
-    assert "若已成交：请以已录入成交为准；系统不假设订单已执行" in text
+    assert "取消原计划/不再追价" in text
+    assert "未成交则取消" in text
+    assert "已成交以成交记录为准" in text
 
 
 def test_closing_without_1030_record_is_only_risk_snapshot():
@@ -136,7 +137,7 @@ def test_closing_without_1030_record_is_only_risk_snapshot():
         pm, old_records, fetcher,
         dt.datetime(2026, 9, 28, 14, 10, tzinfo=CN_TZ),
     )
-    assert "仅为风险快照，不伪造早盘计划" in text
+    assert "无10:30基准，仅保留风险快照" in text
     assert "结论：风险退出" not in text
 
 

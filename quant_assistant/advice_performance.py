@@ -60,6 +60,7 @@ def make_records(reports: dict, generated_at: dt.datetime, commit: str,
         final_decision.update(diagnostics)
         records.append({
             **facts, **diagnostics,
+            "morning_observation": advice.get("morning_observation"),
             "advice_id": hashlib.sha256(identity.encode()).hexdigest()[:24],
             "as_of": as_of, "code": pos.code, "name": pos.name,
             "advice_session": advice_session,

@@ -43,7 +43,9 @@ def test_cheap_stable_relative_weakness_holds_until_reclaim():
 
 
 def test_expensive_deteriorating_weakness_reduces():
-    result = decide(etf_case(cheap=False, deteriorating=True, bench=101))
+    values = etf_case(cheap=False, deteriorating=True, bench=101)
+    values[-1]["time_of_day_confidence"] = "HIGH"
+    result = decide(values)
     assert result["final_action"] == "REDUCE"
     assert result["decision_confidence"] == "HIGH"
     assert "基本面代理恶化" in result["action_reason"]
@@ -154,7 +156,7 @@ def test_report_fetches_fundamentals_and_saves_audit_without_raw_history():
     detail = []
     text = build_morning_execution(report, fetcher, NOW, detail=detail)
     assert "结论：减仓" not in text
-    assert "基本面 STABLE；估值 CHEAP；低吸状态 LOW_BUY_WATCH" in detail[0]
+    assert "基本面 STABLE；估值 CHEAP；低吸状态 LOW_BUY_WATCH" in "\n".join(detail)
     saved = make_records(report, NOW, "synthetic", "10:30_EXECUTION")
     assert saved[0]["valuation_percentile"] is not None
     assert "fundamental_observations" not in saved[0]
@@ -169,5 +171,5 @@ def test_report_fetches_fundamentals_and_saves_audit_without_raw_history():
     text = build_closing_execution(SimpleNamespace(positions=[pos], cash=100000), saved,
                                    fetcher, later, detail=detail)
     assert "结论：风险退出" not in text
-    assert "14:10后如未成交不追价" in text
-    assert "行情过旧" in detail[0]
+    assert "数据降级：1只行情不足，暂不执行" in text
+    assert "行情过旧" in "\n".join(detail)

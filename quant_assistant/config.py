@@ -103,7 +103,7 @@ STRATEGY_PARAMS = {
 # Final Decision Engine。这里只管理真实账户建议的确定性收敛和人工执行参考，
 # 不参与 ETF allocation/rebalance/backtest，也不会生成自动订单。
 FINAL_DECISION_PARAMS = {
-    "version": "final-decision-v3-fundamental",
+    "version": "final-decision-v4-morning-confirmation",
     "stock_lot_size": 100,
     "etf_lot_size": STRATEGY_PARAMS["lot_size"],
     "add_fraction_of_assets": 0.01,
@@ -188,4 +188,12 @@ LIMIT_PCT = {
     "科创板": 0.20,
     "北交所": 0.30,
     "ETF": 0.10,
+}
+
+# Account intraday timing only; does not change allocation/backtest parameters.
+MORNING_CONFIRMATION_PARAMS = {
+    "version": "morning-confirmation-v1",
+    "rebound_min": 0.01, "rebound_max": 0.02, "rebound_atr": 0.5,
+    "weakness_minutes": 30, "max_observation_minutes": 240,
+    "relative_deterioration": 0.002,
 }

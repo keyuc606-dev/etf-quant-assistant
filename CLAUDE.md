@@ -169,3 +169,7 @@ Python 3.9 已过官方 EOL；v1.3.0 起运行时迁移到 Python 3.12（CI 矩�
 ## 基本面与估值层
 
 10:30/14:10账户建议使用确定性基本面/估值代理；低吸须估值合理且基本面稳定/改善，缺失UNKNOWN。失效位风控优先。数据、映射、降级、合成示例及验收见 `docs/FUNDAMENTAL-VALUATION-v1.md`。14:10为尾盘提前执行计划，未成交不追价。
+
+## 早盘确认与极简主推送
+
+`final-decision-v4-morning-confirmation` 在账户盘中最终动作之后应用 `morning-confirmation-v1`，不改周度策略与回测。普通早盘减仓改为条件式 HOLD；明确失效 RISK_EXIT 始终立即有效。10:30/14:10 主报告最多3项、每项最多4行，不用表格。完整诊断留在附件和审计记录。规则、月度指标、合成电池ETF对比和live验收见 `docs/MORNING-CONFIRMATION-v1.md`。

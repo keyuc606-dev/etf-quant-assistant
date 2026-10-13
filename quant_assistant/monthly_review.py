@@ -196,9 +196,34 @@ def _group(rows: list[dict], key: str) -> dict:
     return {name: _aggregate(items) for name, items in sorted(groups.items())}
 
 
+def _morning_trade(trade, record):
+    try:
+        stamp = dt.datetime.fromisoformat(str(trade.get("executed_at") or trade.get("timestamp")))
+        if stamp.tzinfo is None:
+            return False
+        local = stamp.astimezone(dt.timezone(dt.timedelta(hours=8)))
+        return str(local.date()) == record.get("as_of") and dt.time(9, 30) <= local.time() < dt.time(11, 30)
+    except (ValueError, TypeError):
+        return False
+
+
+def _snapshot_return(record, minute):
+    try:
+        snapshot = (record.get("intraday_followups") or {}).get(str(minute), {})
+        start = dt.datetime.fromisoformat(record["signal_as_of"])
+        end = dt.datetime.fromisoformat(snapshot["as_of"])
+        if not start.tzinfo or not end.tzinfo or abs((end - start).total_seconds() - minute * 60) > 60:
+            return None
+        price = float(snapshot["price"])
+        return price / record["signal_price"] - 1 if price > 0 and record["signal_price"] > 0 else None
+    except (KeyError, ValueError, TypeError, ZeroDivisionError):
+        return None
+
+
 def build_monthly_review(records: list[dict], executions: list[dict],
                          market_data: dict[str, pd.DataFrame], month: str,
-                         cutoff: dt.date | None = None) -> dict:
+                         cutoff: dt.date | None = None,
+                         closing_observations: list[dict] | None = None) -> dict:
     first, last = _month(month)
     cutoff = cutoff or dt.date.today()
     selected = []
@@ -209,6 +234,7 @@ def build_monthly_review(records: list[dict], executions: list[dict],
             continue
         if first <= advice_day <= last:
             selected.append(record)
+    closing = {row["advice_id"]: row for row in closing_observations or []}
     rows = []
     for record in selected:
         quality, missing = classify_record(record)
@@ -253,6 +279,32 @@ def build_monthly_review(records: list[dict], executions: list[dict],
             else row["mae_20d"]
         )
         row.update(execution)
+        end = closing.get(record.get("advice_id"), {})
+        try:
+            stamp = dt.datetime.fromisoformat(end["observed_at"])
+            local = stamp.astimezone(dt.timezone(dt.timedelta(hours=8)))
+            if not stamp.tzinfo or str(local.date()) != record.get("as_of") or not dt.time(13, 55) <= local.time() <= dt.time(14, 25):
+                end = {}
+        except (KeyError, ValueError, TypeError):
+            end = {}
+        row["closing_confirmation_state"] = end.get("confirmation_state")
+        row["morning_record_quality"] = ("complete" if all(record.get(k) is not None for k in ("morning_confirmation_version", "time_of_day_confidence", "confirmation_state", "signal_price")) else "partial" if record.get("morning_confirmation_version") else "legacy")
+        row["morning_reduce_candidate_count"] = int(bool(record.get("morning_reduce_candidate")))
+        linked_sells = [trade for trade in executions if trade.get("related_plan_id") == record.get("advice_id")
+                        and trade.get("side") == "SELL" and _morning_trade(trade, record)]
+        row["morning_reduce_executed_count"] = int(bool(linked_sells) and bool(record.get("morning_reduce_candidate")))
+        row["morning_reduce_cancelled_by_rebound"] = int(bool(record.get("morning_reduce_candidate")) and
+            end.get("confirmation_state") == "CANCELLED_BY_REBOUND")
+        start_price, end_price = record.get("signal_price"), end.get("price")
+        row["morning_to_1410_return"] = end_price / start_price - 1 if start_price and end_price else None
+        # No minute bars are fetched: absent snapshots stay unknown rather than using daily highs.
+        for minute in (30, 60):
+            row[f"rebound_after_morning_signal_{minute}m"] = _snapshot_return(record, minute)
+        qty = sum(int(trade.get("quantity") or 0) for trade in linked_sells)
+        notional = sum(int(trade.get("quantity") or 0) * float(trade.get("price") or 0) for trade in linked_sells)
+        fee = sum(float(trade.get("fee") or 0) for trade in linked_sells)
+        row["morning_sell_avoided_loss_to_1410"] = notional - qty * end_price - fee if qty and end_price else None
+        row["morning_sell_opportunity_cost_to_1410"] = -row["morning_sell_avoided_loss_to_1410"] if row["morning_sell_avoided_loss_to_1410"] is not None else None
         row["unexecuted_actionable"] = action in ("ADD", "REDUCE", "RISK_EXIT") and not execution["trade_count"]
         rows.append(row)
 
@@ -305,6 +357,18 @@ def build_monthly_review(records: list[dict], executions: list[dict],
             "samples": sum(row["unexecuted_actionable"] for row in rows),
             "theoretical_20d": _mean(row["directional_20d_return"] for row in rows
                                      if row["unexecuted_actionable"]),
+        },
+        "by_time_of_day_confidence": _group(rows, "time_of_day_confidence"),
+        "by_confirmation_state": _group(rows, "confirmation_state"),
+        "morning_confirmation": {
+            **{key: sum(row[key] for row in rows) for key in (
+                "morning_reduce_candidate_count", "morning_reduce_executed_count", "morning_reduce_cancelled_by_rebound")},
+            **{key: _mean(row[key] for row in rows) for key in (
+                "rebound_after_morning_signal_30m", "rebound_after_morning_signal_60m", "morning_to_1410_return",
+                "morning_sell_avoided_loss_to_1410", "morning_sell_opportunity_cost_to_1410")},
+            "legacy_count": sum(row["morning_record_quality"] == "legacy" for row in rows),
+            "closing_sample_count": sum(row["morning_to_1410_return"] is not None for row in rows),
+            "partial_count": sum(row["morning_record_quality"] == "partial" for row in rows),
         },
         "rows": rows,
     }
@@ -368,14 +432,19 @@ def render_markdown(report: dict) -> str:
                        ("ma20_break_only", "by_ma20_break_only"),
                        ("fundamental_state", "by_fundamental_state"),
                        ("valuation_state", "by_valuation_state"),
-                       ("low_buy_state", "by_low_buy_state")):
+                       ("low_buy_state", "by_low_buy_state"),
+                       ("time_of_day_confidence", "by_time_of_day_confidence"),
+                       ("confirmation_state", "by_confirmation_state")):
         lines.append(f"### {title}")
         lines.append("")
         for name, item in report[key].items():
             lines.append(f"- {name}：{item['samples']} 条；10日平均 {_pct(item['mean_return']['10'])}；"
                          f"20日动作表现 {_pct(item['mean_directional_return_20d'])}")
         lines.append("")
-    lines += ["## 口径", "",
+    lines += ["## 早盘延迟确认验证", ""]
+    for key, value in report["morning_confirmation"].items():
+        lines.append(f"- {key}：{value if value is not None else 'N/A（缺少可靠盘中事实）'}")
+    lines += ["", "## 口径", "",
               "- 5/10/20 窗口只按行情中实际存在的交易日推进，不按自然日。",
               "- REDUCE/RISK_EXIT 的“动作表现”按相对继续持有的规避效果反向计；其余动作展示后续价格表现。",
               "- 最大回撤为本月建议样本在20交易日窗口内的最差方向化 MAE，不是账户净值回撤。",

@@ -12,6 +12,7 @@ from ..config import MARKET_FILTER_PARAMS as CFG
 from ..trading_calendar import annual_trade_dates
 
 from .fundamental import FIELDS as FUNDAMENTAL_FIELDS
+from .morning_confirmation import FIELDS as MORNING_FIELDS, context
 
 VERSION = CFG["version"]
 DIAGNOSTIC_FIELDS = (
@@ -21,7 +22,7 @@ DIAGNOSTIC_FIELDS = (
     "trend_break_candidate", "ma20_break_only", "support_hold", "support_break",
     "invalidation_break", "mean_reversion_candidate", "reclaim_confirmed",
     "volume_price_confirmation", "sell_confirmations", "filter_applicability",
-) + FUNDAMENTAL_FIELDS
+) + FUNDAMENTAL_FIELDS + MORNING_FIELDS
 
 
 def number(value):
@@ -225,4 +226,6 @@ def execution_evidence(position, record, quote, ma, environment=None,
                   volume_price_confirmation=volume_sell or momentum, sell_confirmations=confirmations,
                   volume_ratio=ratio, mean_reversion_state="RECLAIM_CONFIRMED" if candidate else
                   "SUPPORT_HOLD" if support_hold else "UNCONFIRMED")
+    result.update(context(record, quote, result, now, bool(now and fresh_quote(quote, now)),
+                          price, low, atr, support, ma20))
     return result

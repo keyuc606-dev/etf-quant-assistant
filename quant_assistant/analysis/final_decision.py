@@ -12,6 +12,7 @@ from .market_filter import execution_evidence, DIAGNOSTIC_FIELDS
 
 
 from .fundamental import evaluate, annotate
+from .morning_confirmation import apply as confirm_morning
 
 VERSION = FINAL_DECISION_PARAMS["version"]
 FINAL_ACTIONS = ("HOLD", "ADD", "REDUCE", "RISK_EXIT", "NO_ACTION", "MANUAL_REVIEW")
@@ -373,6 +374,7 @@ def build_intraday_final_decision(position, record: dict | None, quote: dict,
     decision = _build_intraday_final_decision(position, record, quote, price_status, ma,
                                              evidence, total_assets, cash, equity_exposure)
     decision = annotate(decision, facts, evidence)
+    decision = confirm_morning(decision, evidence, record or {})
     return {**{key: evidence.get(key) for key in DIAGNOSTIC_FIELDS}, **decision}
 
 

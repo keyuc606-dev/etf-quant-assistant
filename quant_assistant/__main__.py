@@ -271,7 +271,8 @@ def cmd_monthly_review(args):
             first = datetime.datetime.strptime(month, "%Y-%m").date()
             age = max(90, (cutoff - first).days + 45)
             market_data[code] = fetcher.fetch_hist(code, market, days=age)
-        report = build_monthly_review(records, executions, market_data, month, cutoff)
+        report = build_monthly_review(records, executions, market_data, month, cutoff,
+                                      state.get("closing_observations", []))
         csv_path, md_path = write_monthly_review(report, output_dir)
         print(f"{month} 月度复盘已生成：{csv_path}；{md_path}")
 

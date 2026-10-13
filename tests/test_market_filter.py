@@ -79,15 +79,17 @@ def test_broad_selloff_relative_weak_and_prior_low_break_reduces_high():
     result = decide(scenario(price=94, support=96))
     assert result["relative_strength_state"] == "REL_WEAK"
     assert result["support_break"] is True
-    assert result["final_action"] == "REDUCE"
-    assert result["decision_confidence"] == "HIGH"
+    assert result["final_action"] == "HOLD"
+    assert result["confirmation_state"] == "WAIT_CONFIRMATION"
+    assert result["conditional_quantity"] > 0
 
 
 def test_independent_weakness_in_strong_market_reduces_high():
     result = decide(scenario(price=97, bench=101))
     assert result["market_regime"] == "UP"
-    assert result["final_action"] == "REDUCE"
-    assert result["decision_confidence"] == "HIGH"
+    assert result["final_action"] == "HOLD"
+    assert result["confirmation_state"] == "WAIT_CONFIRMATION"
+    assert result["conditional_quantity"] > 0
 
 
 def test_invalidation_always_exits_even_with_forced_mean_reversion_candidate():
@@ -205,7 +207,7 @@ def reports(count=6):
     return {"views": views, "advices": advices, "stock_data": data, "execution_cash": 1000000}
 
 
-def test_reports_hide_ma20_only_and_cap_confirmed_reductions_at_five():
+def test_reports_hide_ma20_only_and_cap_conditional_reductions_at_three():
     report = reports()
     fetcher = SimpleNamespace(fetch_hist=lambda *a, **kw: frame(),
         fetch_intraday_quote=lambda code, market, now: quote(now=now))
@@ -215,12 +217,12 @@ def test_reports_hide_ma20_only_and_cap_confirmed_reductions_at_five():
     fetcher.fetch_intraday_quote = lambda code, market, now: quote(97 if code in BENCHMARKS else 94, now=now)
     report = reports()
     text = build_morning_execution(report, fetcher, NOW)
-    assert text.count("结论：减仓") == 5
+    assert text.count("结论：先不减") == 3
     saved = make_records(report, NOW, "test", "10:30_EXECUTION")
     assert saved[0]["market_regime"] == "BROAD_SELLOFF"
     assert saved[0]["final_decision"]["relative_strength_state"] == "REL_WEAK"
     later = NOW.replace(hour=14, minute=10)
     pm = SimpleNamespace(positions=[v["position"] for v in report["views"]], cash=1000000)
     text = build_closing_execution(pm, saved, fetcher, later)
-    assert text.count("结论：减仓") == 5
-    assert "显著跑输基准" in text
+    assert text.count("结论：减仓") == 3
+    assert "已跌破前低" in text

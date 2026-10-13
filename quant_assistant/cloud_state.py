@@ -57,6 +57,8 @@ def validate_cloud_state(state: dict) -> dict:
             raise ValueError(f"telegram.{field} 无效")
     if not isinstance(state.get("advice_records", []), list):
         raise ValueError("advice_records 必须是列表")
+    if not isinstance(state.get("closing_observations", []), list):
+        raise ValueError("closing_observations 必须是列表")
     return state
 
 
