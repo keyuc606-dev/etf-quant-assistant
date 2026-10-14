@@ -717,7 +717,9 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
     detail = []
     text = build_morning_execution(reports, fetcher, now, quality, detail)
     if not quality.get("fresh_provisional"):
-        raise RuntimeError("没有可验证的当日新鲜 provisional 行情，10:30执行策略不推送")
+        # A scheduled run can arrive after close. Never fabricate a baseline
+        # from yesterday's prices, but make the missing notification visible.
+        text = _unavailable_execution_notice("10:30早盘", now)
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = REPORT_DIR / "my-portfolio-morning-execution.md"
     path.write_text(text + "\n", encoding="utf-8")
@@ -725,17 +727,28 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
     detail_path.write_text("# 10:30早盘详细数据（provisional，仅人工参考）\n\n" +
                            "\n\n".join(detail) + "\n", encoding="utf-8")
     reports["telegram"] = path
-    save_morning_advice(reports, now, store=store, fetcher=fetcher,
-                        advice_session=EXECUTION_SESSION)
+    if quality.get("fresh_provisional"):
+        save_morning_advice(reports, now, store=store, fetcher=fetcher,
+                            advice_session=EXECUTION_SESSION)
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(path.read_text(encoding="utf-8")):
         fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
     fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
-    print("10:30数据校验：新鲜provisional报价=True；"
+    print(f"10:30数据校验：新鲜provisional报价={quality.get('fresh_provisional', False)}；"
           f"存在降级={quality['degraded']}；主屏动作={quality['action_count']}")
     return path
+
+
+def _unavailable_execution_notice(session: str, now: dt.datetime) -> str:
+    local = now.astimezone(CN_TZ)
+    timing = "工作流延迟到收盘后运行" if local.time() > dt.time(15, 5) else "行情源不可用或报价无法验证新鲜度"
+    return (f"【{local.date()} {session}｜降级通知】\n"
+            f"实际运行时间：{local:%H:%M} 北京时间；{timing}。\n"
+            "没有可验证的当日新鲜盘中行情，本次不生成交易动作。\n"
+            "不以旧价补造10:30建议或14:10确认；持仓和现金不变。\n"
+            "请勿因漏推补做交易，下一交易时段按新报价重新确认。")
 
 
 def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
@@ -750,6 +763,9 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     text = build_closing_execution(PortfolioManager(), state.get("advice_records", []), fetcher,
                                    now, quality,
                                    TradingService().repository.list_executions(), detail)
+    if now.astimezone(CN_TZ).time() > dt.time(15, 5):
+        text = _unavailable_execution_notice("14:10尾盘", now)
+        quality["closing_observations"] = []
     observations = quality.get("closing_observations", [])
     if observations:
         existing = state.get("closing_observations", [])
