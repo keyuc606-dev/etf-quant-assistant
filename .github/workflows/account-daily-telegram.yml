@@ -5,6 +5,8 @@ name: Account Morning Execution Telegram
   schedule:
     # GitHub Actions cron uses UTC. 02:30 UTC = 10:30 Asia/Shanghai.
     - cron: "30 2 * * 1-5"
+    # Independent backup events; cloud reservation prevents duplicate delivery.
+    - cron: "35,40,45 2 * * 1-5"
 
 permissions:
   contents: read
@@ -41,6 +43,7 @@ jobs:
         run: python -m quant_assistant.cloud_state restore
 
       - name: Generate and send morning execution plan
+        id: execution
         env:
           ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
@@ -49,9 +52,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
-        run: python -m quant_assistant notify-morning-execution
+        run: python -m quant_assistant.scheduled_execution morning
 
       - name: Scan ETF opportunities and send V2 allocation card
+        if: steps.execution.outputs.sent == 'true'
         env:
           ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
           ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}

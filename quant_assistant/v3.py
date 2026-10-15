@@ -715,7 +715,11 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
     fetcher = fetcher or DataFetcher()
     quality = {}
     detail = []
-    text = build_morning_execution(reports, fetcher, now, quality, detail)
+    if dt.time(10, 30) <= now.astimezone(CN_TZ).time() <= dt.time(11, 30):
+        text = build_morning_execution(reports, fetcher, now, quality, detail)
+    else:
+        quality.update(fresh_provisional=False, degraded=True, action_count=0)
+        text = _unavailable_execution_notice("10:30早盘", now)
     if not quality.get("fresh_provisional"):
         # A scheduled run can arrive after close. Never fabricate a baseline
         # from yesterday's prices, but make the missing notification visible.
@@ -734,8 +738,10 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(path.read_text(encoding="utf-8")):
-        fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
-    fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
+        receipt = fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
+        print(f"Telegram accepted text: message_id={receipt.get('message_id')}")
+    receipt = fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
+    print(f"Telegram accepted attachment: message_id={receipt.get('message_id')}")
     print(f"10:30数据校验：新鲜provisional报价={quality.get('fresh_provisional', False)}；"
           f"存在降级={quality['degraded']}；主屏动作={quality['action_count']}")
     return path
@@ -743,7 +749,9 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
 
 def _unavailable_execution_notice(session: str, now: dt.datetime) -> str:
     local = now.astimezone(CN_TZ)
-    timing = "工作流延迟到收盘后运行" if local.time() > dt.time(15, 5) else "行情源不可用或报价无法验证新鲜度"
+    timing = ("工作流延迟到收盘后运行" if local.time() > dt.time(15, 5)
+              else "工作流已超出早盘运行窗口" if session == "10:30早盘" and local.time() > dt.time(11, 30)
+              else "行情源不可用或报价无法验证新鲜度")
     return (f"【{local.date()} {session}｜降级通知】\n"
             f"实际运行时间：{local:%H:%M} 北京时间；{timing}。\n"
             "没有可验证的当日新鲜盘中行情，本次不生成交易动作。\n"
@@ -788,6 +796,8 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(text):
-        fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
-    fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
+        receipt = fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
+        print(f"Telegram accepted text: message_id={receipt.get('message_id')}")
+    receipt = fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
+    print(f"Telegram accepted attachment: message_id={receipt.get('message_id')}")
     return path

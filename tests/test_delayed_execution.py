@@ -44,6 +44,41 @@ def test_fresh_morning_still_saves_baseline(tmp_path, monkeypatch):
     assert save.call_args.kwargs['advice_session'] == '10:30_EXECUTION'
 
 
+def test_fundamental_outage_still_sends_no_action_report(tmp_path, monkeypatch):
+    reports, _ = _reports()
+    reports['views'][0]['data_date'] = '2026-10-14'
+    fetcher = Mock()
+    fetcher.fetch_intraday_quote.return_value = {
+        **_quote(100), 'as_of': '2026-10-15T10:30:00+08:00'}
+    fetcher.fetch_fundamental.side_effect = RuntimeError('optional source unavailable')
+    fetcher.send_telegram_message.return_value = {'ok': True, 'message_id': 123}
+    fetcher.send_telegram_document.return_value = {'ok': True, 'message_id': 124}
+    save = Mock()
+    monkeypatch.setattr(v3, 'save_morning_advice', save)
+    monkeypatch.setattr(v3, 'REPORT_DIR', tmp_path)
+    path = v3.notify_morning_execution(reports, dt.datetime(2026, 10, 15, 10, 30, tzinfo=CN_TZ),
+                                     Mock(), fetcher, SimpleNamespace(bot_token='fake', chat_id='fake'))
+    assert '没有需要你现在处理的动作' in path.read_text(encoding='utf-8')
+    fetcher.fetch_fundamental.assert_called_once()
+    fetcher.send_telegram_message.assert_called_once()
+    save.assert_called_once()
+
+
+def test_afternoon_fresh_quotes_cannot_be_saved_as_1030_baseline(tmp_path, monkeypatch):
+    reports, _ = _reports()
+    fetcher, save = Mock(), Mock()
+    fetcher.fetch_intraday_quote.return_value = {
+        **_quote(), 'as_of': '2026-10-15T13:30:00+08:00'}
+    monkeypatch.setattr(v3, 'save_morning_advice', save)
+    monkeypatch.setattr(v3, 'REPORT_DIR', tmp_path)
+    path = v3.notify_morning_execution(reports, dt.datetime(2026, 10, 15, 13, 30, tzinfo=CN_TZ),
+                                     Mock(), fetcher, SimpleNamespace(bot_token='fake', chat_id='fake'))
+    assert '超出早盘运行窗口' in path.read_text(encoding='utf-8')
+    save.assert_not_called()
+    fetcher.fetch_intraday_quote.assert_not_called()
+    fetcher.send_telegram_message.assert_called_once()
+
+
 @pytest.mark.parametrize('hour,minute', [(14, 10), (16, 0)])
 def test_closing_without_quotes_preserves_legacy_account(tmp_path, monkeypatch, hour, minute):
     _, pm = _reports()

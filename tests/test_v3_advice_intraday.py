@@ -232,4 +232,4 @@ def test_workflow_utc_and_shared_lock():
     assert 'cron: "20 1 * * 1-5"' not in daily
     notify_step = daily.split("- name: Generate and send morning execution plan", 1)[1]
     assert "ACCOUNT_STATE_TOKEN:" in notify_step and "ACCOUNT_STATE_REPO:" in notify_step
-    assert "run: python -m quant_assistant notify-morning-execution" in daily
+    assert "run: python -m quant_assistant.scheduled_execution morning" in daily

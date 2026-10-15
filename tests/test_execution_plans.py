@@ -160,5 +160,5 @@ def test_workflow_has_only_1030_and_1410_user_schedules():
     assert 'cron: "30 2 * * 1-5"' in morning
     assert 'cron: "10 6 * * 1-5"' in closing
     assert 'cron: "20 1 * * 1-5"' not in morning
-    assert "notify-morning-execution" in morning
+    assert "quant_assistant.scheduled_execution morning" in morning
     assert "group: account-cloud-state" in morning and "group: account-cloud-state" in closing

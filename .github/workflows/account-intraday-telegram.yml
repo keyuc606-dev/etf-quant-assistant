@@ -5,6 +5,8 @@ name: Account Closing Execution Telegram
   schedule:
     # 06:10 UTC = 14:10 Asia/Shanghai; weekdays only.
     - cron: "10 6 * * 1-5"
+    # Independent backup events; cloud reservation prevents duplicate delivery.
+    - cron: "15,20,25 6 * * 1-5"
 
 permissions:
   contents: read
@@ -42,7 +44,7 @@ jobs:
           ACCOUNT_SNAPSHOT_B64: ${{ secrets.ACCOUNT_SNAPSHOT_B64 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m quant_assistant notify-intraday
+        run: python -m quant_assistant.scheduled_execution closing
       - name: Remove sensitive runtime files
         if: always()
         shell: bash
