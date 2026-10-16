@@ -103,6 +103,9 @@ def notify_daily(result: dict, notifier: TelegramNotifier | None = None,
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     text = Path(result["compact"]).read_text(encoding="utf-8")
+    from ..execution_window import require_execution, CN_TZ
     for part in split_telegram_message(text):
+        require_execution(datetime.datetime.now(CN_TZ), "morning")
         fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
+    require_execution(datetime.datetime.now(CN_TZ), "morning")
     fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, result["detail"])

@@ -1,0 +1,44 @@
+name: Deploy production scheduler
+"on":
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: Billing-enabled Google Cloud project ID (after bootstrap)
+        required: true
+        type: string
+      project_number:
+        description: Project number printed by bootstrap
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest tests/ -q
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/${{ inputs.project_number }}/locations/global/workloadIdentityPools/github/providers/etf
+          service_account: etf-deployer@${{ inputs.project_id }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Build, deploy, schedule and safely verify
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          ACCOUNT_STATE_TOKEN: ${{ secrets.ACCOUNT_STATE_TOKEN }}
+          ACCOUNT_STATE_REPO: ${{ secrets.ACCOUNT_STATE_REPO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash deploy/deploy-gcp.sh

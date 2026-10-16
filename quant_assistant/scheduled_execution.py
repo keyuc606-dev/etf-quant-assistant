@@ -1,21 +1,20 @@
-"""Serialize redundant schedule events using the existing cloud-state lock.
+"""Serialize redundant schedule events using the existing cloud-state SHA CAS.
 
-The workflow concurrency group must remain account-cloud-state. A reservation
+GitHub disaster workflows also retain account-cloud-state concurrency. A reservation
 is never automatically retried: a crash after Telegram accepts a message has
 an ambiguous outcome and blindly retrying could send duplicate advice.
 """
 import argparse
 import datetime as dt
 import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 from .cloud_state import CloudStateStore
 from .data.fetcher import CN_TZ, DataFetcher
 from .trading_calendar import TradingDayStatus
-
-
-TARGETS = {"morning": dt.time(10, 30), "closing": dt.time(14, 10)}
+from .execution_window import TARGETS, execution_allowed
 
 
 def run(session, now=None, store=None, fetcher=None, action=None):
@@ -23,7 +22,7 @@ def run(session, now=None, store=None, fetcher=None, action=None):
     target = TARGETS[session]
     status = (fetcher or DataFetcher()).a_share_trading_day_status(now.date())
     print(f"Schedule gate: date={now.date()} session={session} trading_day={status.value}")
-    if status is not TradingDayStatus.OPEN or now.time() < target:
+    if status is not TradingDayStatus.OPEN or not execution_allowed(now, session):
         print("No notification: market closed/unknown or session not due")
         return False
     store = store or CloudStateStore()
@@ -31,12 +30,13 @@ def run(session, now=None, store=None, fetcher=None, action=None):
     state, sha = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     previous = state.get("execution_deliveries", {}).get(key)
     if previous:
-        if previous["status"] != "sent":
+        if previous["status"] not in ("sent", "skipped"):
             raise RuntimeError(f"Ambiguous delivery {key}; inspect original run {previous.get('run_id')} receipts before retry")
         print(f"Duplicate suppressed: {key} status={previous['status']}; inspect original run for receipts")
         return False
     record = {"status": "sending", "started_at": now.isoformat(),
-              "run_id": os.getenv("GITHUB_RUN_ID", "local"),
+              "reservation_id": uuid.uuid4().hex,
+              "run_id": os.getenv("GITHUB_RUN_ID") or os.getenv("CLOUD_RUN_EXECUTION", "local"),
               "code_commit": os.getenv("GITHUB_SHA", "local"),
               "scheduled_for": dt.datetime.combine(now.date(), target, CN_TZ).isoformat()}
     state.setdefault("execution_deliveries", {})[key] = record
@@ -46,19 +46,22 @@ def run(session, now=None, store=None, fetcher=None, action=None):
         raise RuntimeError("Execution reservation readback failed; nothing sent")
     if action is None:
         from .__main__ import cmd_notify_intraday, cmd_notify_morning_execution
-        action = lambda: (cmd_notify_morning_execution(SimpleNamespace(days=120))
-                          if session == "morning" else cmd_notify_intraday(SimpleNamespace()))
-    action()
+        action = lambda: bool(cmd_notify_morning_execution(SimpleNamespace(days=120))
+                               if session == "morning" else cmd_notify_intraday(SimpleNamespace()))
+    delivered = action() is not False
     # Reload: the action may have appended advice/observations. Never overwrite it.
     state, sha = store.load()
     if state.get("execution_deliveries", {}).get(key) != record:
         raise RuntimeError("Execution reservation changed; inspect receipts before retry")
-    state["execution_deliveries"][key] = {**record, "status": "sent",
+    state["execution_deliveries"][key] = {**record, "status": "sent" if delivered else "skipped",
                                           "completed_at": dt.datetime.now(CN_TZ).isoformat()}
     store.save(state, sha, f"Confirm execution delivery {key}")
     verified, _ = store.load()
     if verified.get("execution_deliveries", {}).get(key) != state["execution_deliveries"][key]:
         raise RuntimeError("Execution receipt readback failed; do not resend blindly")
+    if not delivered:
+        print(f"Execution delivery {key}: safely skipped; no Telegram delivery confirmed")
+        return False
     summary = (f"Execution delivery {key}: sent; scheduled={record['scheduled_for']}; "
                f"actual={record['started_at']}; Telegram message IDs are in the sending step log.\n")
     print(summary)

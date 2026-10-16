@@ -125,7 +125,8 @@ def test_cache_timeout_cooldown_and_stale_snapshot(tmp_path):
 
 def test_schedule_and_audit_fields():
     workflow = Path(".github/workflows/account-intraday-telegram.yml").read_text()
-    assert '"10 6 * * 1-5"' in workflow
+    assert 'schedule:' not in workflow
+    assert 'workflow_dispatch:' in workflow
     assert "cancel-in-progress: false" in workflow
     assert {"fundamental_state", "valuation_percentile", "low_buy_state",
             "tech_vs_fundamental_conflict"} <= set(FIELDS)
