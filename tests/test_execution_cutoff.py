@@ -74,6 +74,18 @@ def test_quote_ages_during_generation_fail_closed():
         v3._require_current_quotes({'quote_times': [at(14, 0).isoformat()]}, at(14, 6))
 
 
+def test_closing_health_without_baseline_still_exposes_verified_quote_timestamp():
+    _, pm = _reports()
+    fetcher = Mock()
+    fetcher.fetch_intraday_quote.return_value = {**_quote(), 'as_of': at(14, 0).isoformat()}
+    quality = {}
+    text = v3.build_closing_execution(pm, [], fetcher, at(14, 0), quality)
+    assert '14:00:00' in text and '无10:30基准' in text
+    assert '没有需要你现在处理的动作' in text
+    assert quality['fresh_provisional']
+    assert quality['closing_observations'] == []
+
+
 def test_formal_morning_write_cannot_bypass_cutoff():
     store = Mock()
     with pytest.raises(RuntimeError, match='execution cutoff exceeded'):

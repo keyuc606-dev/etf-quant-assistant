@@ -5,7 +5,7 @@ set -euo pipefail
 PROJECT="${1:?Usage: bash deploy/bootstrap-gcp.sh PROJECT_ID}"
 REGION=asia-northeast1
 gcloud config set project "$PROJECT"
-gcloud services enable run.googleapis.com cloudscheduler.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
+gcloud services enable run.googleapis.com cloudscheduler.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com iam.googleapis.com cloudresourcemanager.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
 NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
 for NAME in etf-deployer etf-runtime etf-scheduler; do
   gcloud iam service-accounts describe "$NAME@$PROJECT.iam.gserviceaccount.com" >/dev/null 2>&1 || gcloud iam service-accounts create "$NAME"

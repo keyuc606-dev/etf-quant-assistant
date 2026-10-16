@@ -651,8 +651,13 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
             degraded.append(pos.code)
             continue
         if record is None:
+            if _execution_data_quality("HIGH", quote, now) != "LOW":
+                quote_times.append(quote["as_of"])
+                fresh_count += 1
+            else:
+                degraded.append(pos.code)
             if detail is not None:
-                detail.append(f"### {pos.name} {pos.code}\n无10:30执行建议基准；仅保留风险快照。")
+                detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of')}；无10:30执行建议基准；仅保留风险快照。")
             continue
         if _execution_data_quality(record.get("data_quality", "LOW"), quote, now) != "LOW":
             quote_times.append(quote["as_of"])
