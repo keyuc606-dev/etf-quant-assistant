@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RETIRED: use deploy/cloudflare-scheduler; Google billing is not required.
+echo "Retired Google Cloud deployment. See docs/PRODUCTION-SCHEDULER.md for the free default." >&2
+exit 1
 # Run in Google Cloud Shell after selecting a billing-enabled project.
 # Contains no user secrets. Idempotent: safe to rerun.
 set -euo pipefail

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RETIRED: use deploy/cloudflare-scheduler; Google billing is not required.
+echo "Retired Google Cloud deployment. See docs/PRODUCTION-SCHEDULER.md for the free default." >&2
+exit 1
 set -euo pipefail
 : "${PROJECT_ID:?}" "${PROJECT_NUMBER:?}" "${GITHUB_SHA:?}"
 REGION=asia-northeast1

@@ -2,6 +2,18 @@ name: Account Closing Execution Telegram
 
 "on":
   workflow_dispatch:
+    inputs:
+      session:
+        description: Must match this workflow (closing)
+        type: choice
+        options: [morning, closing]
+        default: closing
+        required: true
+      dry_run:
+        description: Validate only; no private state or Telegram access
+        type: boolean
+        default: true
+        required: true
 
 
 permissions:
@@ -12,7 +24,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Reject mismatched session
+        env:
+          SESSION: ${{ inputs.session }}
+        run: test "$SESSION" = "closing"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Offline safety verification (never reads secrets or sends)
+        run: python -m pytest tests/test_execution_cutoff.py tests/test_execution_schedule.py -q
   notify:
+    needs: validate
+    if: inputs.dry_run == false && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

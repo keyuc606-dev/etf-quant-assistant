@@ -177,3 +177,5 @@ Telegram 交易反馈的命令格式、私有云端状态和部署步骤见
 可选在 GitHub Actions 增加 `OPENAI_API_KEY` Secret；模型只接收去标识化的代码、规则倾向与理由，并且只能压缩说明和排序，不能写入任何数字字段。未配置 key、网络失败或响应异常时自动使用纯规则版，日报与 Telegram 仍正常发送。可选仓库变量 `OPENAI_MODEL` 用于覆盖默认模型 `gpt-5-mini`。
 
 版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+生产调度默认使用免费 Cloudflare Workers Cron → GitHub Actions，详见 [最短部署步骤](docs/PRODUCTION-SCHEDULER.md)。无需 Google Cloud 或结算账户。
