@@ -223,12 +223,12 @@ def test_tencent_fallback_requires_fresh_timestamp():
 def test_workflow_utc_and_shared_lock():
     workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
     intraday = (workflows / "account-intraday-telegram.yml").read_text()
-    assert 'cron: "10 6 * * 1-5"' in intraday
+    assert "schedule:" not in intraday
     for filename in ("account-daily-telegram.yml", "account-trade-telegram.yml",
                      "account-intraday-telegram.yml"):
         assert "group: account-cloud-state" in (workflows / filename).read_text()
     daily = (workflows / "account-daily-telegram.yml").read_text()
-    assert 'cron: "30 2 * * 1-5"' in daily
+    assert "schedule:" not in daily
     assert 'cron: "20 1 * * 1-5"' not in daily
     notify_step = daily.split("- name: Generate and send morning execution plan", 1)[1]
     assert "ACCOUNT_STATE_TOKEN:" in notify_step and "ACCOUNT_STATE_REPO:" in notify_step

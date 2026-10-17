@@ -214,15 +214,19 @@ def cmd_notify_morning_execution(args):
     if os.getenv("GITHUB_ACTIONS") == "true" and not cloud_available():
         raise RuntimeError("云端建议状态凭据缺失，10:30执行策略未推送")
     path = notify_morning_execution(reports)
-    print(f"10:30早盘执行策略已推送：{path}")
+    if path:
+        print(f"10:30早盘执行策略已推送：{path}")
+    return path
 
 
 def cmd_notify_intraday(args):
     from .v3 import notify_intraday
-    if not _notification_trading_day_gate("14:10"):
+    if not _notification_trading_day_gate("14:00"):
         return
     path = notify_intraday()
-    print(f"14:10尾盘执行策略已推送：{path}")
+    if path:
+        print(f"14:00尾盘执行策略已推送：{path}")
+    return path
 
 
 def cmd_advice_recalculate(args):
@@ -443,6 +447,9 @@ def cmd_weekly(args):
 def cmd_etf_v2_daily(args):
     from .etf_v2.service import build_daily
 
+    from .execution_window import execution_allowed, CN_TZ
+    if not execution_allowed(datetime.datetime.now(CN_TZ), "morning"):
+        return
     result = build_daily(investable_cash=args.funds)
     print(result["compact"].read_text(encoding="utf-8"))
     print(f"详细报告: {result['detail']}")
@@ -454,6 +461,9 @@ def cmd_notify_etf_v2(args):
     from .etf_v2.service import build_daily, notify_daily
 
     if not _notification_trading_day_gate("ETF V2"):
+        return
+    from .execution_window import execution_allowed, CN_TZ
+    if not execution_allowed(datetime.datetime.now(CN_TZ), "morning"):
         return
     result = build_daily(investable_cash=args.funds)
     notify_daily(result)
@@ -580,7 +590,7 @@ def main():
     p_morning.add_argument("--days", type=int, default=120, help="行情回看天数（默认120）")
     p_morning.set_defaults(func=cmd_notify_morning_execution)
 
-    p_intraday = sub.add_parser("notify-intraday", help="14:10 尾盘执行策略")
+    p_intraday = sub.add_parser("notify-intraday", help="14:00 尾盘执行策略")
     p_intraday.set_defaults(func=cmd_notify_intraday)
 
     p_perf = sub.add_parser("advice-recalculate", help="从私有原始建议与市场日线重算统计")

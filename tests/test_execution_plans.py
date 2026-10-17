@@ -68,7 +68,7 @@ def test_morning_is_capped_at_three_and_uses_no_chase_language():
     fetcher.fetch_intraday_quote.return_value = _quote()
     text = build_morning_execution(
         reports, fetcher, dt.datetime(2026, 9, 28, 10, 30, tzinfo=CN_TZ))
-    assert text.count("未成交不追价，14:10复核") == 3
+    assert text.count("未成交不追价，14:00复核") == 3
     assert "其余3只：另有3项候选见详细报告" in text
     assert "【10:30 早盘策略】" in text
 
@@ -157,8 +157,8 @@ def test_workflow_has_only_1030_and_1410_user_schedules():
     workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
     morning = (workflows / "account-daily-telegram.yml").read_text()
     closing = (workflows / "account-intraday-telegram.yml").read_text()
-    assert 'cron: "30 2 * * 1-5"' in morning
-    assert 'cron: "10 6 * * 1-5"' in closing
+    assert "schedule:" not in morning
+    assert "schedule:" not in closing
     assert 'cron: "20 1 * * 1-5"' not in morning
     assert "quant_assistant.scheduled_execution morning" in morning
     assert "group: account-cloud-state" in morning and "group: account-cloud-state" in closing

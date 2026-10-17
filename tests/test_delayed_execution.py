@@ -24,6 +24,11 @@ def test_missing_quotes_notify_without_fabricating_baseline(tmp_path, monkeypatc
     monkeypatch.setattr(v3, 'REPORT_DIR', tmp_path)
     path = v3.notify_morning_execution(reports, now, Mock(), fetcher,
                                      SimpleNamespace(bot_token='fake', chat_id='fake'))
+    if hour == 15:
+        assert path is None
+        save.assert_not_called()
+        fetcher.send_telegram_message.assert_not_called()
+        return
     assert '降级通知' in path.read_text(encoding='utf-8')
     assert '不生成交易动作' in path.read_text(encoding='utf-8')
     assert ('收盘后' in path.read_text(encoding='utf-8')) == (hour == 15)
@@ -73,10 +78,10 @@ def test_afternoon_fresh_quotes_cannot_be_saved_as_1030_baseline(tmp_path, monke
     monkeypatch.setattr(v3, 'REPORT_DIR', tmp_path)
     path = v3.notify_morning_execution(reports, dt.datetime(2026, 10, 15, 13, 30, tzinfo=CN_TZ),
                                      Mock(), fetcher, SimpleNamespace(bot_token='fake', chat_id='fake'))
-    assert '超出早盘运行窗口' in path.read_text(encoding='utf-8')
+    assert path is None
     save.assert_not_called()
     fetcher.fetch_intraday_quote.assert_not_called()
-    fetcher.send_telegram_message.assert_called_once()
+    fetcher.send_telegram_message.assert_not_called()
 
 
 @pytest.mark.parametrize('hour,minute', [(14, 10), (16, 0)])
@@ -94,7 +99,12 @@ def test_closing_without_quotes_preserves_legacy_account(tmp_path, monkeypatch, 
     monkeypatch.setattr(v3, 'REPORT_DIR', tmp_path)
     path = v3.notify_intraday(dt.datetime(2026, 10, 14, hour, minute, tzinfo=CN_TZ),
                              store, fetcher, SimpleNamespace(bot_token='fake', chat_id='fake'))
-    assert ('降级通知' in path.read_text(encoding='utf-8')) == (hour == 16)
+    if hour == 16:
+        assert path is None
+        store.load.assert_not_called()
+        fetcher.send_telegram_message.assert_not_called()
+        return
+    assert '不可验证' in path.read_text(encoding='utf-8')
     store.save.assert_not_called()
     assert store.load.return_value[0] == original
     fetcher.send_telegram_message.assert_called_once()

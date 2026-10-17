@@ -22,7 +22,7 @@ class Store:
         self.state = copy.deepcopy(state)
 
 
-@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 30), ("closing", 14, 10)])
+@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 30), ("closing", 14, 0)])
 def test_actual_incident_day_and_redundant_events(session, hour, minute, tmp_path, monkeypatch):
     store, action = Store(), Mock()
     original = copy.deepcopy(store.state)
@@ -44,7 +44,7 @@ def test_actual_incident_day_and_redundant_events(session, hour, minute, tmp_pat
     assert store.state["execution_deliveries"][f"2026-10-15:{session}"]["status"] == "sent"
 
 
-@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 29), ("closing", 14, 9)])
+@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 29), ("closing", 13, 59)])
 def test_never_send_before_scheduled_time(session, hour, minute):
     store, action, fetcher = Mock(), Mock(), Mock()
     fetcher.a_share_trading_day_status.return_value = TradingDayStatus.OPEN
@@ -83,8 +83,8 @@ def test_ambiguous_send_failure_is_not_blindly_retried():
 ])
 def test_workflow_schedule_and_shared_lock(file, primary, backup, command):
     text = (Path(__file__).resolve().parents[1] / ".github/workflows" / file).read_text(encoding="utf-8")
-    assert f'cron: "{primary}"' in text
-    assert f'cron: "{backup}"' in text
+    assert "schedule:" not in text
+    assert "workflow_dispatch:" in text
     assert f"python -m quant_assistant.scheduled_execution {command}" in text
     assert "group: account-cloud-state" in text
     assert "cancel-in-progress: false" in text

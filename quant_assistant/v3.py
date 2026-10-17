@@ -22,6 +22,7 @@ from .config import MARKET_FILTER_PARAMS
 from .models import Market
 from .portfolio.holdings import PortfolioManager
 from .trading.service import TradingService
+from .execution_window import execution_allowed, require_execution
 
 
 EXECUTION_SESSION = "10:30_EXECUTION"
@@ -64,10 +65,12 @@ def recalculate(records: list[dict], now: dt.datetime, fetcher=None,
 
 def save_morning_advice(reports: dict, now: dt.datetime | None = None,
                         store=None, fetcher=None,
-                        advice_session: str = "09:20_LEGACY") -> dict | None:
+                        advice_session: str = "09:20_LEGACY", boundary_check=None) -> dict | None:
     if store is None and not cloud_available():
         return None
     now = now or dt.datetime.now(CN_TZ)
+    if advice_session == EXECUTION_SESSION:
+        require_execution(now, "morning")
     store = store or CloudStateStore()
     state, sha = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     incoming = make_records(reports, now, os.getenv("GITHUB_SHA", "local"), advice_session)
@@ -75,6 +78,8 @@ def save_morning_advice(reports: dict, now: dt.datetime | None = None,
     combined = append_immutable(existing, incoming)
     if len(combined) != len(existing):
         state["advice_records"] = combined
+        if boundary_check is not None:
+            boundary_check()
         store.save(state, sha, f"Record {advice_session} advice {now.astimezone(CN_TZ).date()}")
     persisted, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     persisted_by_id = {row["advice_id"]: row for row in persisted.get("advice_records", [])}
@@ -166,7 +171,7 @@ def _execution_data_quality(base: str, quote: dict | None,
                 return "LOW"
             local_now = now.astimezone(CN_TZ)
             if (stamp.astimezone(CN_TZ).date() != local_now.date() or
-                    abs((local_now - stamp.astimezone(CN_TZ)).total_seconds()) > 900):
+                    not -30 <= (local_now - stamp.astimezone(CN_TZ)).total_seconds() <= 300):
                 return "LOW"
         except (TypeError, ValueError):
             return "LOW"
@@ -249,9 +254,14 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
                             quality: dict | None = None,
                             detail: list[str] | None = None) -> str:
     """Build the 10:30 executable shortlist from fresh provisional quotes."""
+    if not execution_allowed(now, "morning"):
+        if quality is not None:
+            quality.update(fresh_provisional=False, degraded=True, action_count=0)
+        return "【REVIEW｜下一交易日观察】执行窗口已结束，不生成当天执行建议。"
     temporary = make_records(reports, now, os.getenv("GITHUB_SHA", "local"), EXECUTION_SESSION)
     records = {row["code"]: row for row in temporary}
     advices = {row["code"]: row for row in reports["advices"]}
+    quote_times = []
     candidates = []
     degraded = []
     environment, benchmark_frames, benchmark_quotes = _execution_market(fetcher, now)
@@ -263,6 +273,8 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
         advice = advices[pos.code]
         record = records[pos.code]
         quote = fetcher.fetch_intraday_quote(pos.code, pos.market, now)
+        if _execution_data_quality(advice.get("data_quality", "LOW"), quote, now) != "LOW":
+            quote_times.append(quote["as_of"])
         data_quality = _execution_data_quality(advice.get("data_quality", "LOW"), quote, now)
         if data_quality == "LOW":
             degraded.append(pos.code)
@@ -322,12 +334,13 @@ def build_morning_execution(reports: dict, fetcher, now: dt.datetime,
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:3]
     if quality is not None:
-        quality.update({"fresh_provisional": bool(reports["views"]) and
+        quality.update({"quote_times": quote_times, "fresh_provisional": bool(reports["views"]) and
                          len(degraded) < len(reports["views"]),
                         "degraded": bool(degraded), "action_count": len(selected)})
     day = now.astimezone(CN_TZ).date().isoformat()
-    return compact_execution("10:30 早盘策略", day,
+    text = compact_execution("10:30 早盘策略", day,
         [(row[2], row[3], "") for row in candidates], len(reports["views"]), len(degraded))
+    return text + _quote_time_note(quote_times)
 
 
 def plain_reason(decision):
@@ -371,10 +384,10 @@ def compact_execution(title, day, selected, total, degraded=0, baseline=True):
         lines.append(f"结论：{label}" + (f"{qty:,}{unit}" if qty else ""))
         condition = decision["trigger_condition"] if pending else (
             "未成交则取消；已成交以成交记录为准，不追价" if change == "CANCEL" else
-            "按计划区间人工确认；未成交不追价，14:10复核" if title.startswith("10:30") else
+            "按计划区间人工确认；未成交不追价，14:00复核" if title.startswith("10:30") else
             "按更新区间人工确认；已成交以成交记录为准，未成交不追价")
         if decision.get("final_action") == "RISK_EXIT":
-            condition = "失效位已破，立即人工核验退出；" + condition.replace("，14:10复核", "")
+            condition = "失效位已破，立即人工核验退出；" + condition.replace("，14:00复核", "")
         if not pending and change != "CANCEL":
             condition = f"挂单{_render_order_range(decision.get('limit_range'))}；" + condition
         lines.append("条件：" + condition)
@@ -615,9 +628,15 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
                             executions: list[dict] | None = None,
                             detail: list[str] | None = None) -> str:
     """Re-check the immutable 10:30 plan without assuming order execution."""
+    if not execution_allowed(now, "closing"):
+        if quality is not None:
+            quality.update(morning_advice=False, fresh_provisional=False, degraded=True,
+                           action_count=0, closing_observations=[])
+        return "【REVIEW｜下一交易日观察】执行窗口已结束，不生成当天执行建议。"
     day = now.astimezone(CN_TZ).date().isoformat()
     morning = {row["code"]: row for row in records
                if row.get("as_of") == day and row.get("advice_session") == EXECUTION_SESSION}
+    quote_times = []
     candidates = []
     degraded = []
     fresh_count = 0
@@ -632,9 +651,16 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
             degraded.append(pos.code)
             continue
         if record is None:
+            if _execution_data_quality("HIGH", quote, now) != "LOW":
+                quote_times.append(quote["as_of"])
+                fresh_count += 1
+            else:
+                degraded.append(pos.code)
             if detail is not None:
-                detail.append(f"### {pos.name} {pos.code}\n无10:30执行建议基准；仅保留风险快照。")
+                detail.append(f"### {pos.name} {pos.code}\n报价 {quote.get('as_of')}；无10:30执行建议基准；仅保留风险快照。")
             continue
+        if _execution_data_quality(record.get("data_quality", "LOW"), quote, now) != "LOW":
+            quote_times.append(quote["as_of"])
         data_quality = _execution_data_quality(record.get("data_quality", "LOW"), quote, now)
         if data_quality == "LOW":
             degraded.append(pos.code)
@@ -699,19 +725,22 @@ def build_closing_execution(pm, records: list[dict], fetcher, now: dt.datetime,
     candidates.sort(key=lambda row: (row[0], row[1]))
     selected = candidates[:3]
     if quality is not None:
-        quality.update({"morning_advice": bool(morning), "fresh_provisional": fresh_count > 0,
+        quality.update({"quote_times": quote_times, "morning_advice": bool(morning), "fresh_provisional": fresh_count > 0,
                         "degraded": bool(degraded), "action_count": len(selected),
                         "closing_observations": observations})
-    return compact_execution("14:10 尾盘策略", day,
+    text = compact_execution("14:00 尾盘策略", day,
         [(row[2], row[4], row[5]) for row in candidates], len(pm.positions), len(degraded), bool(morning))
-
+    return text + _quote_time_note(quote_times)
 
 
 def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
-                             store=None, fetcher=None, notifier=None) -> Path:
+                             store=None, fetcher=None, notifier=None, clock=None) -> Path | None:
     """Persist the 10:30 baseline, verify it, then send the compact execution card."""
     from .notifications.telegram import TelegramNotifier, split_telegram_message
-    now = now or dt.datetime.now(CN_TZ)
+    clock = clock or ((lambda: now) if now is not None else lambda: dt.datetime.now(CN_TZ))
+    now = clock()
+    if not execution_allowed(now, "morning"):
+        return None
     fetcher = fetcher or DataFetcher()
     quality = {}
     detail = []
@@ -732,14 +761,22 @@ def notify_morning_execution(reports: dict, now: dt.datetime | None = None,
                            "\n\n".join(detail) + "\n", encoding="utf-8")
     reports["telegram"] = path
     if quality.get("fresh_provisional"):
+        require_execution(clock(), "morning")
+        _require_current_quotes(quality, clock())
         save_morning_advice(reports, now, store=store, fetcher=fetcher,
-                            advice_session=EXECUTION_SESSION)
+                            advice_session=EXECUTION_SESSION,
+                            boundary_check=lambda: (require_execution(clock(), "morning"),
+                                                    _require_current_quotes(quality, clock())))
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(path.read_text(encoding="utf-8")):
+        require_execution(clock(), "morning")
+        _require_current_quotes(quality, clock())
         receipt = fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
         print(f"Telegram accepted text: message_id={receipt.get('message_id')}")
+    require_execution(clock(), "morning")
+    _require_current_quotes(quality, clock())
     receipt = fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
     print(f"Telegram accepted attachment: message_id={receipt.get('message_id')}")
     print(f"10:30数据校验：新鲜provisional报价={quality.get('fresh_provisional', False)}；"
@@ -755,14 +792,31 @@ def _unavailable_execution_notice(session: str, now: dt.datetime) -> str:
     return (f"【{local.date()} {session}｜降级通知】\n"
             f"实际运行时间：{local:%H:%M} 北京时间；{timing}。\n"
             "没有可验证的当日新鲜盘中行情，本次不生成交易动作。\n"
-            "不以旧价补造10:30建议或14:10确认；持仓和现金不变。\n"
+            "不以旧价补造10:30建议或14:00确认；持仓和现金不变。\n"
             "请勿因漏推补做交易，下一交易时段按新报价重新确认。")
 
 
+def _require_current_quotes(quality, now):
+    for value in quality.get("quote_times", []):
+        stamp = dt.datetime.fromisoformat(value)
+        if stamp.tzinfo is None or not -30 <= (now - stamp).total_seconds() <= 300:
+            raise RuntimeError("stale quote at execution boundary; no advice sent")
+
+
+def _quote_time_note(values):
+    stamps = sorted(dt.datetime.fromisoformat(value).astimezone(CN_TZ) for value in values)
+    text = (f"{stamps[0]:%H:%M:%S} ～ {stamps[-1]:%H:%M:%S}" if stamps
+            else "不可验证，本次不执行")
+    return "\n行情时间（北京时间）：" + text
+
+
 def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
-                    notifier=None) -> Path:
+                    notifier=None, clock=None) -> Path | None:
     from .notifications.telegram import TelegramNotifier, split_telegram_message
-    now = now or dt.datetime.now(CN_TZ)
+    clock = clock or ((lambda: now) if now is not None else lambda: dt.datetime.now(CN_TZ))
+    now = clock()
+    if not execution_allowed(now, "closing"):
+        return None
     store = store or CloudStateStore()
     state, sha = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
     fetcher = fetcher or DataFetcher()
@@ -772,16 +826,18 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
                                    now, quality,
                                    TradingService().repository.list_executions(), detail)
     if now.astimezone(CN_TZ).time() > dt.time(15, 5):
-        text = _unavailable_execution_notice("14:10尾盘", now)
+        text = _unavailable_execution_notice("14:00尾盘", now)
         quality["closing_observations"] = []
     observations = quality.get("closing_observations", [])
+    require_execution(clock(), "closing")
+    _require_current_quotes(quality, clock())
     if observations:
         existing = state.get("closing_observations", [])
         ids = {row["advice_id"] for row in existing}
         incoming = [row for row in observations if row["advice_id"] not in ids]
         if incoming:
             state["closing_observations"] = existing + incoming
-            store.save(state, sha, f"Record 14:10 confirmation {now.astimezone(CN_TZ).date()}")
+            store.save(state, sha, f"Record 14:00 confirmation {now.astimezone(CN_TZ).date()}")
             persisted, _ = store.load(os.getenv("ACCOUNT_SNAPSHOT_B64", ""))
             saved = {row["advice_id"]: row for row in persisted.get("closing_observations", [])}
             if any(saved.get(row["advice_id"]) != row for row in incoming):
@@ -791,13 +847,17 @@ def notify_intraday(now: dt.datetime | None = None, store=None, fetcher=None,
     path = REPORT_DIR / "my-portfolio-intraday.md"
     path.write_text(text + "\n", encoding="utf-8")
     detail_path = REPORT_DIR / "my-portfolio-intraday-detail.md"
-    detail_path.write_text("# 14:10尾盘详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
+    detail_path.write_text("# 14:00尾盘详细数据（provisional，仅人工参考）\n\n" + "\n\n".join(detail) + "\n", encoding="utf-8")
     notifier = notifier or TelegramNotifier(fetcher=fetcher)
     if not notifier.bot_token or not notifier.chat_id:
         raise RuntimeError("缺少 Telegram 凭据")
     for part in split_telegram_message(text):
+        require_execution(clock(), "closing")
+        _require_current_quotes(quality, clock())
         receipt = fetcher.send_telegram_message(notifier.bot_token, notifier.chat_id, part)
         print(f"Telegram accepted text: message_id={receipt.get('message_id')}")
+    require_execution(clock(), "closing")
+    _require_current_quotes(quality, clock())
     receipt = fetcher.send_telegram_document(notifier.bot_token, notifier.chat_id, detail_path)
     print(f"Telegram accepted attachment: message_id={receipt.get('message_id')}")
     return path

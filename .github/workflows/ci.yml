@@ -28,3 +28,9 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -q
+
+      - name: Validate deployment scripts and production image
+        run: |
+          bash -n deploy/bootstrap-gcp.sh deploy/deploy-gcp.sh
+          docker build -t etf-production-check .
+          docker run --rm --entrypoint python etf-production-check -c "import quant_assistant.production_job; import quant_assistant.v3"

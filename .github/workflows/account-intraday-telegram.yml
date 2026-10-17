@@ -2,11 +2,7 @@ name: Account Closing Execution Telegram
 
 "on":
   workflow_dispatch:
-  schedule:
-    # 06:10 UTC = 14:10 Asia/Shanghai; weekdays only.
-    - cron: "10 6 * * 1-5"
-    # Independent backup events; cloud reservation prevents duplicate delivery.
-    - cron: "15,20,25 6 * * 1-5"
+
 
 permissions:
   contents: read
