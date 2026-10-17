@@ -176,4 +176,4 @@ Python 3.9 已过官方 EOL；v1.3.0 起运行时迁移到 Python 3.12（CI 矩�
 
 ## 生产调度
 
-盘中任务迁移至东京 Cloud Scheduler + Cloud Run Jobs，GitHub仅CI／手动灾备。14:15:00之后禁止当天执行推送，报价新鲜度300秒；部署、事故证据和验收见 docs/PRODUCTION-SCHEDULER.md。已有账户／Telegram secrets由部署工作流复用。
+默认使用免费 Cloudflare Workers Cron → GitHub Actions workflow_dispatch。Python策略与现有secrets继续在GitHub运行；无需Google Cloud或结算账户。14:15:00之后禁止当天执行推送，报价新鲜度300秒；部署与验收见 docs/PRODUCTION-SCHEDULER.md。

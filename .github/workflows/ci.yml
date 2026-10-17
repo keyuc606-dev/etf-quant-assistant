@@ -29,6 +29,13 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ -q
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify free scheduler
+        run: |
+          node --check deploy/cloudflare-scheduler/worker.mjs
+          node --test deploy/cloudflare-scheduler/worker.test.mjs
       - name: Validate deployment scripts and production image
         run: |
           bash -n deploy/bootstrap-gcp.sh deploy/deploy-gcp.sh

@@ -1,78 +1,55 @@
-# 盘中推送调度迁移（2026-10-16）
+# 免费生产调度：Cloudflare → GitHub Actions
 
-## 事故证据
+默认方案为 Cloudflare Workers **Free** 的两个 Cron，只调用 GitHub workflow_dispatch。Python、行情、Telegram、private state、CI 均留在 GitHub。无需 Google Cloud、结算账户、固定月费或域名。旧 Google 部署入口已移除；deploy/*gcp.sh 与 Dockerfile 仅保留历史参考，不要执行。原方案尚未启用，因此无需迁移云端状态。
 
-所有时间为北京时间。GitHub 的 run 创建与启动时间相同，说明主要延迟发生在 schedule 事件到达之前，不是 Python 计算排队五小时。
+## 最短部署（本人操作一次）
 
-|运行|创建时间|实际行为|
-|---|---|---|
-|38867339300|15:27:33|早盘入口15:27:53开始；15:28:58发降级正文144／附件145，随后仍运行ETF V2推送|
-|38867451450|15:28:35|备用早盘触发，读取当日morning已发送记录，抑制重复|
-|38892604980|19:15:43|尾盘入口19:16:06开始；发降级正文148／附件149|
-|38893301826|19:22:06|备用尾盘触发，读取closing已发送记录，抑制重复|
+1. 创建 Cloudflare 免费账号，进入 Workers & Pages，确认 Workers Free；不要升级 Paid 或添加付费资源。无需购买域名。
+2. 在 GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens 创建 token：Resource owner 为 keyuc606-dev；Only select repositories 仅选 etf-quant-assistant；Repository permissions 仅加 **Actions: Read and write**（Metadata read 自动附带）。设置有效期并记住到期轮换。token 只填 Cloudflare Secret，**不要发给 ChatGPT，也不要写进仓库**。无需提交 Telegram token 或重新配置已有 repo secrets。
+3. Cloudflare → 创建 Worker，命名 etf-free-scheduler → Edit code，将 deploy/cloudflare-scheduler/worker.mjs 全文替换进去 → Deploy。Worker Settings → Variables and Secrets → Add secret，名称 `GITHUB_TOKEN`，填刚创建的 token。再添加一个本人随机生成的长随机 Secret `VERIFY_TOKEN`，仅用于验证 endpoint。
+4. 先验证（见下节），通过后 Worker Settings → Triggers → Cron Triggers 添加两条：`30 2 * * 1-5` 和 `0 6 * * 1-5`。都是 **UTC**，分别对应北京时间周一至周五 **10:30 / 14:00**；节假日由 Python 的真实 A 股日历静默阻断。生效传播最多可能需要15分钟，不要临近开盘才部署。
+5. 保持 Workers Free。查看 Worker 的 Logs/Observability 和 GitHub Actions 的对应运行。设置 token 到期提醒；到期后只替换 Cloudflare Secret。
 
-早盘目标10:30，主事件晚约4小时58分；尾盘原目标14:10，晚约5小时6分。备用事件同样迟到。原策略没有被当成强动作发送，但“成功完成”的降级通知和附带V2卡依然在收盘后打扰用户。
+如熟悉终端，也可在本目录运行：`npx wrangler login` → `npx wrangler secret put GITHUB_TOKEN` → `npx wrangler secret put VERIFY_TOKEN` → `npx wrangler deploy`。Wrangler 可能提示首次创建；按提示先 deploy 创建 Worker 后立刻设置两个 Secret。配置内两个 Cron 会一起生效；务必至少提前一天完成。不要把 secret 放命令参数或 wrangler.toml。首次使用需本机 Node.js 和 Wrangler，本人浏览器授权即可。
 
-## 方案选择与成本
+## 先验证，绝不试发真实交易建议
 
-用户确认没有现成云环境。本机没有云平台CLI／云授权配置；已有GitHub仓库写权限和现有账户状态／Telegram secrets。
+GitHub Actions → Account Morning Execution Telegram → Run workflow：选择 main、session=morning、**dry_run=true**；尾盘同理 session=closing。validate 应成功，notify 必须显示 skipped。dry-run 仅运行离线安全回归，不读 private state、不访问 Telegram、不修改持仓。故意在早盘 workflow 选择 closing 应验证失败。
 
-|方案|可靠性与网络|成本与复杂度|状态及密钥|结论|
-|---|---|---|---|---|
-|GitHub schedule|本次连续数小时延迟；备用触发同样受影响|无需新账户|现有secrets和私有状态|退出盘中生产路径|
-|VPS + systemd timer|可控；日本节点可直接出站GitHub／Telegram，但需维护操作系统与进程|常驻资源、补丁、监控和备份|需另迁密钥，磁盘可持久化|无现成VPS，运维负担较大|
-|AWS EventBridge + Lambda／容器任务|关闭flexible window后分钟粒度；须验证行情出站|可低用量，但Lambda依赖打包／超时或容器网络权限更多|IAM／Secrets，复用GitHub私有状态|可行备选|
-|Railway等平台cron|Python容器简单；仍需验证启动延迟与区域|计划额度及定价需按账户确认|平台变量；外部私有状态|没有已有账户优势|
-|Cloud Scheduler + Cloud Run Jobs（选用）|指定Asia/Shanghai；东京运行Python，直接访问GitHub、公开行情和Telegram|无常驻服务器；两个scheduler job，按短任务计费|Secret Manager，GitHub OIDC短期授权；原私有状态继续为事实源|最符合此项目|
+再在本人的终端向 Worker 发 **POST**：`https://你的Worker.workers.dev/verify?session=morning`，请求头 `Authorization: Bearer 本人的VERIFY_TOKEN`；closing 同理。不要将含 token 的命令或截图发给他人。HTTP 200 和 accepted 只说明 GitHub 接受请求；仍需去 Actions 确认 validate 成功、notify skipped。GET/其他路径404、无凭证401、无效session400、GitHub失败502。该 endpoint 永远强制 dry_run=true，没有生产HTTP入口。
 
-Google每个结算账户有三个免费Scheduler job额度，本方案使用两个；Cloud Run、镜像存储、Secret Manager及外网流量各自计费／免费额度独立，不能承诺总账单永久为零。首次仍需本人开通结算账户。建议设小额预算告警（告警并非硬性消费上限）。
+PowerShell 示例（仅本人本机执行，粘贴不会回显）：
 
-官方依据：[定时执行Cloud Run Jobs](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule)、[Scheduler定价](https://cloud.google.com/scheduler/pricing)、[Cloud Run定价](https://cloud.google.com/run/pricing)、[Secret Manager](https://docs.cloud.google.com/run/docs/configuring/jobs/secrets)、[Scheduler至少一次投递](https://docs.cloud.google.com/scheduler/docs/overview)、[AWS调度精度](https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html)。
-
-东京任务的出站路径不经过用户电脑，也不依赖电脑开机；中国境内访问Google控制台／Telegram仍受当地网络条件影响。日本区域到具体行情源的可用性必须在部署后实测，尚未实测前不声称已验证。托管调度也不保证秒级到达，截止／新鲜度／幂等保护始终必需。
-
-## 新的行为
-
-- 10:30早盘；10:35、10:40备用事件。原早盘确认／条件执行规则保留，超过11:30不再补发早盘。
-- 14:00尾盘；14:05、14:10备用事件。14:15:00之后拒绝当天执行。包含微秒，因此14:15:00.000001也拒绝。时钟以UTC+8（Asia/Shanghai现行北京时间，无夏令时）比较，不依赖本机TZ。
-- 外层任务在恢复账户之前检查交易日／执行窗口；v3在生成前、持久化前、每次正文／附件发送前复查。计算跨过截止会失败关闭并记录`execution cutoff exceeded`。
-- 每份正常执行卡显示实际有效quote timestamp范围（北京时间）。核心报价最多300秒；未来偏差最多30秒，缺少时区或不同日期都降级。生成期间报价老化也拒绝发送。
-- 休市／交易日unknown静默。正常交易日无动作仍发简短健康卡；无可信报价发“本次不执行”降级卡或明确安全跳过日志。
-- 15:00后默认不推送；离线builder被用于收盘后时只返回`REVIEW／下一交易日观察`，不生成强动作、不写正式执行session。没有新增自动收盘报告。
-- 旧GitHub早盘／尾盘schedule全部移除，仅保留workflow_dispatch灾备；CI、交易反馈轮询及状态读取检查保留。交易反馈是用户主动成交记录回执，不是策略推送。
-- 原随早盘追加的ETF V2推送从生产执行路径拆下，避免收盘后仍扫候选和推卡；V2 CLI、回测、模拟账户及历史兼容保留，手动推送也受早盘／截止保护。
-- 所有主／备用／手动灾备使用同一私有状态`date:session` reservation。GitHub Contents SHA乐观锁是跨平台仲裁，不依赖GitHub workflow concurrency。独立UUID区分同一时刻的竞争者。竞争写失败者不能发送；sending状态遇到模糊回执不盲重试。
-- 硬截止前已成功保存的有效基准可保留；若之后统计重算或发送阶段跨过截止则不发送。截止后开始或取完行情时才超时的任务不写正式基准／尾盘observations。没有改真实持仓、现金、交易事实或胜率定义。
-
-## 首次开通：不需要任何secret值
-
-1. 在[Google Cloud控制台](https://console.cloud.google.com/)本人登录，创建／选择一个项目并关联结算账户。这一步涉及账户和支付，必须由本人完成。
-2. 打开该项目的Cloud Shell，执行以下代码（将`YOUR_PROJECT_ID`换成项目ID）：
-
-```bash
-git clone https://github.com/keyuc606-dev/etf-quant-assistant.git
-cd etf-quant-assistant
-bash deploy/bootstrap-gcp.sh YOUR_PROJECT_ID
+```powershell
+$verifySecret = Read-Host 'VERIFY_TOKEN' -AsSecureString
+$verifyCredential = [pscredential]::new('verify', $verifySecret)
+$verifyHeaders = @{ Authorization = 'Bearer ' + $verifyCredential.GetNetworkCredential().Password }
+Invoke-RestMethod -Method Post -Uri 'https://你的Worker.workers.dev/verify?session=morning' -Headers $verifyHeaders
+$verifyHeaders.Clear()
+Remove-Variable verifySecret,verifyCredential,verifyHeaders
 ```
 
-脚本仅创建API、东京镜像仓库、三种服务身份及限定本仓库main的OIDC信任，secret容器不含值。记录最后打印的项目ID／项目数字编号即可；这两项不是secret，可交给代理继续部署，也可自行执行下一步。
+## 安全边界与可观测性
 
-3. GitHub Actions → `Deploy production scheduler` → Run workflow（main），填写项目ID和数字编号。它先跑完整pytest，使用GitHub已有secrets自动创建Secret Manager版本，部署两个job，执行只读state预检，通过后才开schedule。无需重填Telegram／private state密钥，不需要服务账号JSON密钥。
+- Worker 固定仓库、main、workflow与session映射，不执行策略；未知cron不触发。Secret仅用于GitHub API。非2xx、网络失败会抛错并记录dispatch_failed；不会记录token或API响应体。故障无自动重试，避免已接受请求被盲目重试；GitHub侧仍做最终幂等。
+- 两个workflow显式检查session与入口一致，共用 account-cloud-state 并发锁，生产仅main且dry_run=false。手动灾备默认dry_run=true；实际灾备需本人主动取消该选项，并受同样门禁。
+- Python继续校验真实交易日、早盘10:30–11:30、尾盘14:00–14:15:00；14:15:00之后禁止当天执行建议。生成、写入、发送环节已有截止保护；不会收盘后补发。quote超过300秒不给强动作。
+- 私有state的date+session预订、SHA CAS及回读保留。重复抑制；sending/含糊结果失败关闭，核对原日志与Telegram回执前绝不删除key重发。发送无动作健康推送；非交易日/未知日历静默。旧state、09:20历史和monthly review不改。
+- Worker成功不代表策略已送达。请检查GitHub步骤日志、execution_deliveries原运行记录及Telegram message IDs；Worker日志不存账户数据。关闭Cron可暂停生产；不要删除private state。GitHub Actions可能排队；外部Cron并不提供分钟级SLA，迟到会安全跳过。
+- 旧生产GitHub schedule不恢复。account-trade-telegram.yml原有每5分钟轮询是交易反馈，保持不变。cron-job.org仅为可选人工备用，不默认启用；替换主触发源前先关闭Cloudflare Cron，避免双生产源。
 
-更新代码后重新运行部署工作流即可；生产镜像固定到Git commit SHA，不在每个交易时段临时拉main／安装依赖。镜像构建上下文白名单只含requirements和程序代码，账户／缓存／日志／venv／GitHub临时凭据均不会入镜像。
+## 免费额度与避免费用
 
-## 验收、可观察性与回滚
+核验日期2026-10-17：[Cloudflare限制](https://developers.cloudflare.com/workers/platform/limits/)为Free每账号5个Cron、每天100,000请求、10ms CPU。本方案用2个Cron，每工作日2个GitHub请求，不用KV、D1、Queues、付费日志导出或Cloudflare Workflows。I/O等待不等同CPU执行。账号已有Cron计入同一额度。普通内置日志用于排错，不依赖付费监控。
 
-首次只读预检验证真实私有state读取／JSON解析（沿用大Git blob逻辑），不写state、不发Telegram、不执行交易。它不能代替行情源及消息回执的实际运行验收。
+[GitHub计费](https://docs.github.com/en/billing/concepts/product-billing/github-actions)：公共仓库标准GitHub hosted runner免费；私有仓库受账号免费分钟与存储总额度约束，所有workflow（尤其每5分钟反馈轮询）合并计算。请在Billing确认仓库可见性、用量与预算，关闭超额付费/设支持的停止使用预算，勿启用付费runner。系统不创建付费资源；不能保证用户其他项目用量或未来平台政策永远不变。
 
-部署后下个真实交易日（若2026-10-19已部署完成，则当天）：
+官方：[Cron与UTC](https://developers.cloudflare.com/workers/configuration/cron-triggers/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Free定价](https://developers.cloudflare.com/workers/platform/pricing/)、[GitHub dispatch与最小Actions write权限](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。
 
-1. 北京时间10:30／14:00检查Cloud Scheduler执行日志和Cloud Run job开始时间；必须在各自窗口内。
-2. Telegram收到一份主卡（无动作也有健康卡），显示报价时间；明细附件属于同次报告。没有额外V2卡。
-3. 10:35／10:40、14:05／14:10应仅出现`Duplicate suppressed`。私有state中每个`date:session`最多一个sent；核对Telegram回执和commit SHA。
-4. 14:15以后手动运行closing应只出现`execution cutoff exceeded`，没有Telegram、正式session或胜率新增。休市日没有消息。
-5. 预订后崩溃／网络超时的sending记录需要核对原任务回执，禁止删key后盲重发。SHA冲突会失败关闭，不强行覆盖交易反馈更新。应在Cloud Run失败执行和日志中排查；跨系统无法保证Telegram exactly-once，当前取舍为防重复优先。
+## 下一交易日验收
 
-控制台查看Cloud Run Jobs的Execution／Logs；可按需创建失败／缺失通知的监控告警，当前没有自动为用户添加其他通知渠道。
+2026-10-19（周一，最终以真实A股日历门禁为准），分别在北京时间10:30和14:00检查Worker Cron日志、GitHub run创建/开始时间与对应session。确认正常交易日即使无动作也有健康推送，状态各只有一个date+session记录；报价陈旧只降级，无强动作。14:15之后不得补发当天执行建议。休市日应无Telegram。勿用改系统时间、假行情、假成交或清空幂等记录做线上测试。
 
-回滚先暂停`etf-morning`和`etf-closing`两个Cloud Scheduler job，再用指定旧镜像重部署；保留截止保护，勿恢复旧生产cron。暂停后Scheduler仍计job额度；彻底停用可删除两个schedule与job。不要删除私有state或secret来回滚代码。
+## 历史事故
+
+2026-10-15的GitHub scheduled事件曾延迟约5小时，run 38867339300/38867451450与38892604980/38893301826在盘后运行。此事推动移除盘中production schedule；后续Google Cloud方案因用户零成本约束取消。安全截止与幂等继续保留。
