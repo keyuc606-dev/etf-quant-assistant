@@ -2,7 +2,8 @@
 import datetime as dt
 
 CN_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
-TARGETS = {"morning": dt.time(10, 30), "closing": dt.time(14, 0)}
+# Allow connector/runner queue buffer; end windows and quote guards stay fixed.
+TARGETS = {"morning": dt.time(10, 25), "closing": dt.time(13, 50)}
 CUTOFF = dt.time(14, 15)
 
 

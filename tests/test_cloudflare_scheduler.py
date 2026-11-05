@@ -20,7 +20,7 @@ def test_workflow_dispatch_contract_and_no_production_schedule():
         assert f'default: {session}' in workflow
         assert f'run: test "$SESSION" = "{session}"' in workflow
         assert 'needs: validate' in workflow
-        assert "if: inputs.dry_run == false && github.ref == 'refs/heads/main'" in workflow
+        assert "github.event_name == 'workflow_dispatch' && inputs.dry_run == false" in workflow
         assert 'group: account-cloud-state' in workflow
         validate = workflow.split('  validate:', 1)[1].split('  notify:', 1)[0]
         assert 'secrets.' not in validate

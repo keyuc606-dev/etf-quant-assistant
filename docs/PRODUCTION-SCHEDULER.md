@@ -1,6 +1,44 @@
-# 免费生产调度：Cloudflare → GitHub Actions
+# ChatGPT Automations 调度（当前用户默认）
 
-默认方案为 Cloudflare Workers **Free** 的两个 Cron，只调用 GitHub workflow_dispatch。Python、行情、Telegram、private state、CI 均留在 GitHub。无需 Google Cloud、结算账户、固定月费或域名。旧 Google 部署入口已移除；deploy/*gcp.sh 与 Dockerfile 仅保留历史参考，不要执行。原方案尚未启用，因此无需迁移云端状态。
+当前默认：**ChatGPT 定时任务 → GitHub connector 更新专用 trigger 文件 → main push → GitHub Actions 跑原策略**。不需要注册 Cloudflare / Google Cloud，不添加服务、密钥或付费资源。已有 ChatGPT 可用 Automations 与 GitHub 连接是前提；本改动提供入口，不代表已创建定时任务。
+
+## 每次定时任务的精确动作
+
+仓库固定 `keyuc606-dev/etf-quant-assistant`，分支固定 `main`。北京时间（Asia/Shanghai，UTC+8）周一至周五早盘建议 **10:25**（也可10:30），尾盘 **13:50**。节假日由 GitHub 内真实A股交易日门禁静默跳过。
+
+| session | 只更新此文件 | workflow / 文件 |
+|---|---|---|
+| morning | `.automation-triggers/morning.txt` | Account Morning Execution Telegram / `.github/workflows/account-daily-telegram.yml` |
+| closing | `.automation-triggers/closing.txt` | Account Closing Execution Telegram / `.github/workflows/account-intraday-telegram.yml` |
+
+1. 用 GitHub connector `fetch_file(repository_full_name="keyuc606-dev/etf-quant-assistant", path=对应路径, ref="main")` 获取当前 **blob sha**。
+2. 用 `update_file(repository_full_name="keyuc606-dev/etf-quant-assistant", path=同一路径, branch="main", sha=刚获取的sha, content=当前UTC的ISO8601时间戳加换行, message="chore(automation): trigger morning"或closing)`。内容例如 `2026-11-06T02:25:00.123456Z\n`，其中 `\n` 表示实际换行，不是反斜杠字符。每次取真实当前时间，微秒作nonce；**不复制示例时间，不写secret、交易、持仓或策略参数**。
+3. 一次提交只改一个trigger文件，直接更新main，不建PR、不夹带代码、不加 `[skip ci]`。SHA冲突先重新fetch；不强推。重复更新仍由GitHub的date+session抑制双发。任务结束只报告更新commit，不能声称Telegram已送达。
+
+时间戳必须是UTC，支持秒或1–6位小数。入口拒绝超过20分钟或超前60秒的时间戳；排队过久可安全漏推，不能保证20分钟SLA。进入策略时仍校验北京时间：早盘 **10:25–11:30**，尾盘 **13:50–14:15:00**；**14:15:00之后禁止当天执行推送**。不要在盘后补写当天trigger或删除幂等记录补发。
+
+## 入口与安全边界
+
+- push仅监听main及各自的一个精确路径；离线admission再检查整个push的before/after差异必须只有该文件的修改。新增、删除、同时更新两个trigger、混合代码提交均不进入notify。首次合并安装文件不会发送。trigger内容不作为策略输入或统计数据。
+- 两个入口继续调用 `quant_assistant.scheduled_execution morning/closing`，共用 `account-cloud-state` 锁。真实交易日/unknown静默门禁、发送前截止、300秒quote freshness、date+session预订、SHA CAS及回读均保留。sending或含糊结果失败关闭，不能自动清key重发。无动作仍发健康推送，休市不发；不自动下单、不修改真实持仓、不伪造成交。
+- trigger commit只是启动信号，不写advice/execution/trade记录；真实策略运行产生的正式建议仍保留实际运行commit用于审计，月报口径不变。
+- `workflow_dispatch`继续作为手动灾备，默认 `dry_run=true`，只跑离线回归，不读private state、不发Telegram；生产手动执行必须main、匹配session、dry_run=false，也受相同门禁。不要用在线伪造报价/时间测试。
+- 策略GitHub schedule cron不恢复；原交易反馈每五分钟轮询保持不变。Cloudflare部署代码和下方旧文档仅作可选历史方案，不是当前默认；不要同时启用其Cron。
+- GitHub App connector的用户授权写入可以触发push；不要改成workflow内使用仓库 `GITHUB_TOKEN` 更新文件，后者不会递归触发push workflow。参见[GitHub触发说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)。
+
+## 零新增成本与验收
+
+不添加Cloudflare/Google账户、收费数据、付费runner或存储产物。公开仓库使用标准Ubuntu GitHub hosted runner免费；私有仓库受账户免费额度限制，需保持超额付费关闭。ChatGPT既有订阅不因本方案新增收费，本项目不能改变产品套餐资格或保证未来价格。见[GitHub计费](https://docs.github.com/en/billing/concepts/product-billing/github-actions)。
+
+分支CI跑完整pytest；路径、payload、窗口、重复触发及原有cutoff/休市/stale quote回归通过后合并。可用手动dry_run验证两入口。生产验收等待真实交易日，核对Actions运行、date+session记录和Telegram回执；不发送测试盘中策略。只成功写文件不等于执行成功。
+
+---
+
+# 历史可选方案：Cloudflare → GitHub Actions
+
+以下保留供选择其他调度源时参考；当前用户默认使用上文ChatGPT方案。旧窗口和部署日期属于历史记录。
+
+历史方案为 Cloudflare Workers **Free** 的两个 Cron，只调用 GitHub workflow_dispatch。Python、行情、Telegram、private state、CI 均留在 GitHub。无需 Google Cloud、结算账户、固定月费或域名。旧 Google 部署入口已移除；deploy/*gcp.sh 与 Dockerfile 仅保留历史参考，不要执行。原方案尚未启用，因此无需迁移云端状态。
 
 ## 最短部署（本人操作一次）
 

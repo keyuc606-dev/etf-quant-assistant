@@ -176,4 +176,4 @@ Python 3.9 已过官方 EOL；v1.3.0 起运行时迁移到 Python 3.12（CI 矩�
 
 ## 生产调度
 
-默认使用免费 Cloudflare Workers Cron → GitHub Actions workflow_dispatch。Python策略与现有secrets继续在GitHub运行；无需Google Cloud或结算账户。14:15:00之后禁止当天执行推送，报价新鲜度300秒；部署与验收见 docs/PRODUCTION-SCHEDULER.md。
+默认使用 ChatGPT Automations → GitHub connector 更新 `.automation-triggers/morning.txt` / `closing.txt` → GitHub Actions。北京时间10:25/13:50触发，窗口10:25–11:30/13:50–14:15；Cloudflare仅保留为历史可选方案。Python策略与现有secrets继续在GitHub运行；无需Google Cloud或结算账户。14:15:00之后禁止当天执行推送，报价新鲜度300秒；部署与验收见 docs/PRODUCTION-SCHEDULER.md。

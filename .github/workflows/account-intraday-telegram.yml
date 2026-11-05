@@ -1,6 +1,9 @@
 name: Account Closing Execution Telegram
 
 "on":
+  push:
+    branches: [main]
+    paths: [".automation-triggers/closing.txt"]
   workflow_dispatch:
     inputs:
       session:
@@ -27,21 +30,34 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      admitted: ${{ steps.trigger.outputs.admitted }}
     steps:
       - name: Reject mismatched session
+        if: github.event_name == 'workflow_dispatch'
         env:
           SESSION: ${{ inputs.session }}
         run: test "$SESSION" = "closing"
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Admit dedicated trigger-only push
+        if: github.event_name == 'push'
+        id: trigger
+        env:
+          SESSION: closing
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: python -m quant_assistant.automation_trigger
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Offline safety verification (never reads secrets or sends)
-        run: python -m pytest tests/test_execution_cutoff.py tests/test_execution_schedule.py -q
+        run: python -m pytest tests/test_execution_cutoff.py tests/test_execution_schedule.py tests/test_automation_trigger.py -q
   notify:
     needs: validate
-    if: inputs.dry_run == false && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && ((github.event_name == 'push' && needs.validate.outputs.admitted == 'true') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
