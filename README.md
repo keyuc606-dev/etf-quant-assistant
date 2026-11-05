@@ -178,4 +178,4 @@ Telegram 交易反馈的命令格式、私有云端状态和部署步骤见
 
 版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-生产调度默认使用免费 Cloudflare Workers Cron → GitHub Actions，详见 [最短部署步骤](docs/PRODUCTION-SCHEDULER.md)。无需 Google Cloud 或结算账户。
+生产调度默认使用 ChatGPT Automations → GitHub connector 更新专用 trigger 文件 → GitHub Actions，详见 [最短部署步骤](docs/PRODUCTION-SCHEDULER.md)。无需 Cloudflare / Google Cloud 或结算账户。

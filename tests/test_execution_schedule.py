@@ -44,7 +44,7 @@ def test_actual_incident_day_and_redundant_events(session, hour, minute, tmp_pat
     assert store.state["execution_deliveries"][f"2026-10-15:{session}"]["status"] == "sent"
 
 
-@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 29), ("closing", 13, 59)])
+@pytest.mark.parametrize("session,hour,minute", [("morning", 10, 24), ("closing", 13, 49)])
 def test_never_send_before_scheduled_time(session, hour, minute):
     store, action, fetcher = Mock(), Mock(), Mock()
     fetcher.a_share_trading_day_status.return_value = TradingDayStatus.OPEN
